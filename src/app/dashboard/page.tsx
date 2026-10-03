@@ -1,6 +1,9 @@
 // FORCE REBUILD TO FIX EDGE ERROR
 "use client";
 
+export const dynamic = 'force-static';
+export const revalidate = false;
+
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
