@@ -1,4 +1,3 @@
-// FORCE REBUILD TO FIX EDGE ERROR
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from 'react';
@@ -12,32 +11,40 @@ interface FogPolygon { points: Point[]; type: 'add' | 'remove'; }
 interface DiceRoll { id: string; user_nickname: string; dice: string; rolls: string; modifier: number; total: number; created_at: string; }
 interface Participant { id?: any; user_nickname: string; role: string; }
 
-  const FOG_CANVAS_SIZE = 4000;
+interface RoomSave {
+  id?: string;
+  room_id: string;
+  slot: number;
+  name: string;
+  save_data: any;
+  created_at?: string;
+  updated_at?: string;
+}
 
-  const blobToDataUrl = (blob: Blob) => new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
+const FOG_CANVAS_SIZE = 4000;
 
-  // Уменьшаем и пережимаем картинку в WebP (или JPEG, если WebP не поддерживается)
-  const compressImage = async (file: File, maxSide: number, quality: number): Promise<Blob> => {
-    const bitmap = await createImageBitmap(file);
-    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(bitmap.width * scale);
-    canvas.height = Math.round(bitmap.height * scale);
-    canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    bitmap.close();
-    const toBlob = (type: string) => new Promise<Blob | null>(r => canvas.toBlob(r, type, quality));
-    const webp = await toBlob('image/webp');
-    if (webp && webp.type === 'image/webp') return webp;
-    const jpeg = await toBlob('image/jpeg');
-    if (!jpeg) throw new Error('Не удалось сжать изображение');
-    return jpeg;
-  };
+const blobToDataUrl = (blob: Blob) => new Promise<string>((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result as string);
+  reader.onerror = () => reject(reader.error);
+  reader.readAsDataURL(blob);
+});
 
+const compressImage = async (file: File, maxSide: number, quality: number): Promise<Blob> => {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const toBlob = (type: string) => new Promise<Blob | null>(r => canvas.toBlob(r, type, quality));
+  const webp = await toBlob('image/webp');
+  if (webp && webp.type === 'image/webp') return webp;
+  const jpeg = await toBlob('image/jpeg');
+  if (!jpeg) throw new Error('Не удалось сжать изображение');
+  return jpeg;
+};
 
 export default function Dashboard() {
   const [roomKey, setRoomKey] = useState<string | null>(null);
@@ -72,12 +79,9 @@ export default function Dashboard() {
   const [showObjForm, setShowObjForm] = useState(false);
   const [newObj, setNewObj] = useState({ name: '', description: '', image_url: '', grid_size: 1 });
 
-  const [loreFolders, setLoreFolders] = useState<any[]>([]);
+  // 📜 ЛОР: Убраны папки, оставлены только заметки
   const [loreNotes, setLoreNotes] = useState<any[]>([]);
-  const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
-  const [showFolderForm, setShowFolderForm] = useState(false);
   const [showNoteForm, setShowNoteForm] = useState(false);
-  const [newFolderName, setNewFolderName] = useState('');
   const [newNote, setNewNote] = useState({ title: '', content: '' });
 
   const [boardTokens, setBoardTokens] = useState<any[]>([]);
@@ -107,19 +111,16 @@ export default function Dashboard() {
   const [diceHistory, setDiceHistory] = useState<DiceRoll[]>([]);
   const [isDicePanelOpen, setIsDicePanelOpen] = useState(true);
 
-  // Refs для хранения актуальных значений в замыканиях
+  // 💾 СОХРАНЕНИЯ: Новые состояния
+  const [saveName, setSaveName] = useState('');
+  const [selectedSaveSlot, setSelectedSaveSlot] = useState<number | null>(null);
+  const [roomSaves, setRoomSaves] = useState<RoomSave[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingSave, setIsLoadingSave] = useState(false);
+
+  // Refs
   const fogPolygonsRef = useRef(fogPolygons);
   const currentFogPointsRef = useRef(currentFogPoints);
-
-  useEffect(() => {
-    fogPolygonsRef.current = fogPolygons;
-  }, [fogPolygons]);
-
-  useEffect(() => {
-    currentFogPointsRef.current = currentFogPoints;
-  }, [currentFogPoints]);
-
-  // Refs для drag-and-drop: обработчики на window иначе видят устаревший state
   const boardTokensRef = useRef<any[]>([]);
   const draggedTokenRef = useRef<string | null>(null);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
@@ -131,7 +132,13 @@ export default function Dashboard() {
   const [isMapUploading, setIsMapUploading] = useState(false);
   const [remoteFogPreview, setRemoteFogPreview] = useState<{ points: Point[]; type: 'add' | 'remove' } | null>(null);
 
-  // Чужие мазки кистью: координаты нормализованы (0..1), чтобы совпадать на разных экранах
+  useEffect(() => { fogPolygonsRef.current = fogPolygons; }, [fogPolygons]);
+  useEffect(() => { currentFogPointsRef.current = currentFogPoints; }, [currentFogPoints]);
+  useEffect(() => { boardTokensRef.current = boardTokens; }, [boardTokens]);
+  useEffect(() => { mapOffsetRef.current = mapOffset; }, [mapOffset]);
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+  useEffect(() => { gridSizeRef.current = gridSize; }, [gridSize]);
+
   const drawRemoteStroke = (s: any) => {
     const canvas = canvasRef.current, ctx = canvas?.getContext('2d');
     if (!canvas || !ctx || !s) return;
@@ -143,21 +150,12 @@ export default function Dashboard() {
     ctx.lineWidth = s.size; ctx.lineCap = 'round'; ctx.stroke();
   };
 
-  useEffect(() => { boardTokensRef.current = boardTokens; }, [boardTokens]);
-  useEffect(() => { mapOffsetRef.current = mapOffset; }, [mapOffset]);
-  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
-  useEffect(() => { gridSizeRef.current = gridSize; }, [gridSize]);
-
-  // Сигнал остальным клиентам через Broadcast (работает без настроек publication)
-  // Шлём только через открытый WebSocket. Без этого supabase-js превращает каждое сообщение
-  // в отдельный HTTP-запрос, сотни запросов забивают соединение и рвут загрузку данных.
   const isChannelReadyRef = useRef(false);
   const broadcast = useCallback((event: string, payload: any = {}) => {
     if (!channelRef.current || !isChannelReadyRef.current) return;
     channelRef.current.send({ type: 'broadcast', event, payload });
   }, []);
 
-  // Мазки кистью копим и отправляем пачкой раз в 80 мс, а не на каждое движение мыши
   const strokeBufferRef = useRef<any[]>([]);
   const strokeFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const queueStroke = useCallback((stroke: any) => {
@@ -176,14 +174,11 @@ export default function Dashboard() {
     return exists ? list.map(x => (x.id === row.id ? { ...x, ...row } : x)) : [...list, row];
   };
 
-  // Перезагрузка «тяжёлых» полей комнаты. Realtime не присылает поля,
-  // если строка > 1MB (а base64-карта почти всегда больше), поэтому берём их из БД.
   const applyFog = (raw: any) => {
     const fog = typeof raw === 'string' ? JSON.parse(raw) : raw;
     setFogPolygons(Array.isArray(fog) ? fog : []);
   };
 
-  // Лёгкая перезагрузка: туман и сетка (маленькие поля)
   const reloadRoomLight = useCallback(async (id: string) => {
     const { data } = await supabase.from('rooms').select('grid_size, fog_data').eq('id', id).single();
     if (!data) return;
@@ -191,17 +186,12 @@ export default function Dashboard() {
     applyFog(data.fog_data);
   }, []);
 
-  // Полная перезагрузка с картой; защищаемся от параллельных запросов
   const roomReloadInFlight = useRef(false);
   const reloadRoomState = useCallback(async (id: string) => {
     if (roomReloadInFlight.current) return;
     roomReloadInFlight.current = true;
     try {
-      const { data } = await supabase
-        .from('rooms')
-        .select('map_image, grid_size, fog_data')
-        .eq('id', id)
-        .single();
+      const { data } = await supabase.from('rooms').select('map_image, grid_size, fog_data').eq('id', id).single();
       if (!data) return;
       setMapImage(data.map_image || '');
       setGridSize(data.grid_size || 40);
@@ -211,12 +201,13 @@ export default function Dashboard() {
     }
   }, []);
 
+  // ✅ Обновлено: добавлен lore_notes, удален lore_folders
   const tableSetters: Record<string, (rows: any[]) => void> = {
     characters: setCharacters,
     items: setItems,
     objects: setObjects,
     entities: setEntities,
-    lore_folders: setLoreFolders,
+    lore_notes: setLoreNotes,
     board_tokens: setBoardTokens,
     proposals: setProposals,
     room_participants: setParticipants,
@@ -233,24 +224,30 @@ export default function Dashboard() {
       return;
     }
     setter(data);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 💾 Загрузка сохранений
+  const loadRoomSaves = useCallback(async (id: string) => {
+    const { data, error } = await supabase
+      .from('room_saves')
+      .select('*')
+      .eq('room_id', id)
+      .order('slot', { ascending: true });
+
+    if (error) {
+      console.error('Ошибка загрузки сохранений:', error);
+      return;
+    }
+    setRoomSaves(data || []);
+  }, []);
 
   const initRoom = async (savedUser: string) => {
-    const { data: room, error: roomError } = await supabase
-      .from('rooms')
-      .select('*')
-      .eq('room_key', roomKey)
-      .single();
+    const { data: room, error: roomError } = await supabase.from('rooms').select('*').eq('room_key', roomKey).single();
 
     if (roomError || !room) {
       console.error("❌ Ошибка поиска комнаты:", roomError);
       return;
     }
-
-    console.log("📦 Данные комнаты из БД:", room);
-    console.log("️ fog_data:", room.fog_data);
 
     setRoomId(room.id);
     const isDM = room.dm_id === savedUser;
@@ -268,13 +265,12 @@ export default function Dashboard() {
     setGridSize(room.grid_size || 40);
     
     if (room.fog_data && Array.isArray(room.fog_data)) {
-      console.log("✅ Загружен туман войны:", room.fog_data.length, "полигонов");
       setFogPolygons(room.fog_data);
     } else {
-      console.log("⚠️ fog_data пустой или не массив");
       setFogPolygons([]);
     }
     
+    // ✅ Обновлено: убран lore_folders из select
     const { data: roomData, error: dataError } = await supabase
       .from('rooms')
       .select(`
@@ -285,7 +281,7 @@ export default function Dashboard() {
         characters (*),
         items (*),
         objects (*),
-        lore_folders (*),
+        lore_notes (*),
         board_tokens (*),
         dice_rolls (*)
       `)
@@ -303,34 +299,33 @@ export default function Dashboard() {
     setCharacters(roomData.characters || []);
     setItems(roomData.items || []);
     setObjects(roomData.objects || []);
-    setLoreFolders(roomData.lore_folders || []);
+    setLoreNotes(roomData.lore_notes || []); // ✅ Обновлено
     setBoardTokens(roomData.board_tokens || []);
     setDiceHistory(roomData.dice_rolls || []);
+
+    // 💾 Загружаем сохранения при инициализации
+    await loadRoomSaves(room.id);
   };
 
   useEffect(() => {
     const savedUser = localStorage.getItem('dnd_user') || 'Аноним';
     setUser(savedUser);
     if (roomKey) initRoom(savedUser);
-  }, [roomKey]);
+  }, [roomKey, loadRoomSaves]);
 
-  //  REALTIME СИНХРОНИЗАЦИЯ
   useEffect(() => {
     if (!roomId) return;
 
-    const channel = supabase.channel(`room-sync-${roomId}`, {
-      config: { broadcast: { self: false } },
-    });
+    const channel = supabase.channel(`room-sync-${roomId}`, { config: { broadcast: { self: false } } });
 
-    // Универсальная подписка INSERT / UPDATE / DELETE для списков комнаты
-    const listTables = ['room_participants', 'characters', 'items', 'objects', 'entities', 'lore_folders', 'proposals'];
+    // ✅ Обновлено: убран lore_folders из listTables
+    const listTables = ['room_participants', 'characters', 'items', 'objects', 'entities', 'lore_notes', 'proposals'];
     listTables.forEach(table => {
       const setter = tableSetters[table] as any;
       channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `room_id=eq.${roomId}` }, (payload: any) => {
         if (payload.eventType === 'DELETE') {
           setter((prev: any[]) => prev.filter(x => x.id !== payload.old?.id));
         } else if (payload.new?.id !== undefined) {
-          // Для больших строк (картинки base64) Realtime обрезает поля — перечитываем таблицу
           if (payload.errors?.length) reloadTable(table, roomId);
           else setter((prev: any[]) => upsertById(prev, payload.new));
         }
@@ -348,7 +343,6 @@ export default function Dashboard() {
         }
         const row = payload.new;
         if (!row?.id) return;
-        // Не перетираем фишку, которую пользователь сейчас тащит
         if (row.id === draggedTokenRef.current) return;
         if (payload.errors?.length) {
           reloadTable('board_tokens', roomId);
@@ -358,7 +352,6 @@ export default function Dashboard() {
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` }, (payload: any) => {
         const row = payload.new || {};
-        // Небольшая строка приходит целиком — применяем без лишних запросов
         if (!payload.errors?.length && row.map_image !== undefined) {
           setMapImage(row.map_image || '');
           if (row.grid_size) setGridSize(row.grid_size);
@@ -385,7 +378,6 @@ export default function Dashboard() {
         const canvas = canvasRef.current, ctx = canvas?.getContext('2d');
         if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
       })
-      // Broadcast-сигналы: мгновенно и не зависят от размера строки
       .on('broadcast', { event: 'token_moved' }, ({ payload }) => {
         if (payload.id === draggedTokenRef.current) return;
         setBoardTokens(prev => prev.map(t => (t.id === payload.id ? { ...t, ...payload } : t)));
@@ -404,8 +396,6 @@ export default function Dashboard() {
         isChannelReadyRef.current = status === 'SUBSCRIBED';
         if (status === 'SUBSCRIBED') {
           console.log('✅ Realtime синхронизация подключена');
-          // Догоняем изменения, пропущенные во время (пере)подключения.
-          // Карту целиком качаем только при первом подключении — иначе каждое переподключение тянет мегабайты
           if (hasSubscribedOnce.current) reloadRoomLight(roomId);
           else reloadRoomState(roomId);
           hasSubscribedOnce.current = true;
@@ -420,33 +410,29 @@ export default function Dashboard() {
       channelRef.current = null;
       supabase.removeChannel(channel);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, reloadRoomState, reloadRoomLight, reloadTable]);
 
   const saveFogToDatabase = useCallback(async (newFogPolygons: FogPolygon[]) => {
-    if (role !== 'dm' || !roomId) {
-      console.log("⚠️ Не мастер или нет roomId, туман не сохраняется");
-      return;
-    }
-    
-    console.log("💾 Сохраняем туман в БД:", newFogPolygons.length, "полигонов");
+    if (role !== 'dm' || !roomId) return;
     broadcast('fog_updated', { fog: newFogPolygons });
-    
-    const { error } = await supabase
-      .from('rooms')
-      .update({ fog_data: newFogPolygons })
-      .eq('id', roomId);
-    
-    if (error) {
-      console.error("❌ Ошибка сохранения тумана:", error);
-    } else {
-      console.log("✅ Туман сохранён в БД");
-    }
+    const { error } = await supabase.from('rooms').update({ fog_data: newFogPolygons }).eq('id', roomId);
+    if (error) console.error("❌ Ошибка сохранения тумана:", error);
   }, [role, roomId, broadcast]);
 
-  const fetchLoreNotes = async (folderId: string) => { 
-    const { data } = await supabase.from('lore_notes').select('*').eq('folder_id', folderId).order('created_at', { ascending: false }); 
-    if (data) setLoreNotes(data); 
+  const fetchLoreNotes = async (type: 'full' | 'short') => {
+    if (!roomId) return;
+    const { data, error } = await supabase
+      .from('lore_notes')
+      .select('*')
+      .eq('room_id', roomId)
+      .eq('lore_type', type)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Ошибка загрузки лора:', error);
+      return;
+    }
+    setLoreNotes(data || []);
   };
 
   const submitProposal = async () => {
@@ -471,7 +457,6 @@ export default function Dashboard() {
     if (!error) broadcast('room_updated');
   };
 
-  // Вставка + мгновенное обновление своего списка + сигнал остальным
   const insertAndSync = async (table: string, newData: any) => {
     const { data, error } = await supabase.from(table).insert(newData).select().single();
     if (error) {
@@ -526,17 +511,146 @@ export default function Dashboard() {
   const raiseTokenLayer = (token: any) => setTokenLayer(token, Math.min((token.layer || 10) + 1, 99));
   const lowerTokenLayer = (token: any) => setTokenLayer(token, Math.max((token.layer || 10) - 1, 1));
 
-  const addLoreFolder = async (type: 'full' | 'short') => {
-    if (!newFolderName) return alert("Введите название!");
-    if (!(await insertAndSync('lore_folders', { room_id: roomId, name: newFolderName, type, author_nickname: user }))) return;
-    setShowFolderForm(false); setNewFolderName('');
+  // ✅ Обновлено: создание заметки без папок
+  const addLoreNote = async () => {
+    if (!newNote.title.trim()) return alert('Введите название заметки!');
+    if (!newNote.content.trim()) return alert('Введите текст заметки!');
+
+    const type = currentView === 'lore-short' ? 'short' : 'full';
+
+    const { data, error } = await supabase
+      .from('lore_notes')
+      .insert({
+        room_id: roomId,
+        lore_type: type,
+        title: newNote.title.trim(),
+        content: newNote.content,
+        author_nickname: user,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      alert('Ошибка создания заметки: ' + error.message);
+      return;
+    }
+
+    setLoreNotes(prev => [data, ...prev]);
+    setShowNoteForm(false);
+    setNewNote({ title: '', content: '' });
+    broadcast('table_changed', { table: 'lore_notes' });
   };
 
-  const addLoreNote = async () => {
-    if (!selectedFolder || !newNote.title) return alert("Заполните поля!");
-    await supabase.from('lore_notes').insert({ folder_id: selectedFolder, ...newNote, author_nickname: user });
-    setShowNoteForm(false); setNewNote({ title: '', content: '' });
-    fetchLoreNotes(selectedFolder);
+  // 💾 Механика сохранения
+  const createSaveSnapshot = () => {
+    return {
+      map_image: mapImage,
+      grid_size: gridSize,
+      fog_data: fogPolygons,
+      board_tokens: boardTokens.map(token => ({
+        id: token.id,
+        room_id: token.room_id,
+        token_type: token.token_type,
+        token_id: token.token_id,
+        name: token.name,
+        image_url: token.image_url,
+        grid_size: token.grid_size,
+        position_x: token.position_x,
+        position_y: token.position_y,
+        layer: token.layer,
+        author_nickname: token.author_nickname,
+      })),
+    };
+  };
+
+  const saveGame = async () => {
+    if (role !== 'dm') return alert('Только Мастер может сохранять игру.');
+    if (!roomId) return alert('Комната ещё не загружена.');
+    if (!selectedSaveSlot) return alert('Сначала выберите ячейку сохранения.');
+    if (!saveName.trim()) return alert('Введите название сохранения.');
+
+    setIsSaving(true);
+    try {
+      const snapshot = createSaveSnapshot();
+      const { data, error } = await supabase
+        .from('room_saves')
+        .upsert(
+          {
+            room_id: roomId,
+            slot: selectedSaveSlot,
+            name: saveName.trim(),
+            save_data: snapshot,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'room_id,slot' }
+        )
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Ошибка сохранения:', error);
+        alert('Не удалось сохранить игру: ' + error.message);
+        return;
+      }
+
+      setRoomSaves(prev => {
+        const filtered = prev.filter(s => s.slot !== selectedSaveSlot);
+        return [...filtered, data].sort((a, b) => a.slot - b.slot);
+      });
+      alert(`Игра сохранена в ячейку ${selectedSaveSlot}.`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // 💾 Механика загрузки
+  const loadGame = async () => {
+    if (role !== 'dm') return alert('Только Мастер может загружать сохранение.');
+    if (!selectedSaveSlot) return alert('Выберите ячейку для чтения.');
+
+    const save = roomSaves.find(s => s.slot === selectedSaveSlot);
+    if (!save) return alert('В этой ячейке нет сохранения.');
+    if (!confirm(`Выгрузить сохранение «${save.name}»?`)) return;
+
+    setIsLoadingSave(true);
+    try {
+      const data = save.save_data;
+      if (!data) return alert('Сохранение повреждено.');
+
+      if (data.map_image !== undefined) setMapImage(data.map_image || '');
+      if (data.grid_size) setGridSize(data.grid_size);
+
+      const restoredFog = Array.isArray(data.fog_data) ? data.fog_data : [];
+      setFogPolygons(restoredFog);
+
+      await supabase.from('rooms').update({
+        map_image: data.map_image || '',
+        grid_size: data.grid_size || 40,
+        fog_data: restoredFog,
+      }).eq('id', roomId);
+
+      if (Array.isArray(data.board_tokens)) {
+        await supabase.from('board_tokens').delete().eq('room_id', roomId);
+        if (data.board_tokens.length > 0) {
+          const tokens = data.board_tokens.map((token: any) => ({ ...token, room_id: roomId }));
+          const { error: tokenError } = await supabase.from('board_tokens').insert(tokens);
+          if (tokenError) throw tokenError;
+        }
+        setBoardTokens(data.board_tokens);
+        boardTokensRef.current = data.board_tokens;
+      }
+
+      broadcast('room_updated');
+      broadcast('fog_updated', { fog: restoredFog });
+      broadcast('table_changed', { table: 'board_tokens' });
+
+      alert(`Сохранение «${save.name}» выгружено.`);
+    } catch (error: any) {
+      console.error('Ошибка загрузки сохранения:', error);
+      alert('Не удалось выгрузить сохранение: ' + error.message);
+    } finally {
+      setIsLoadingSave(false);
+    }
   };
 
   const handleMapUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -545,20 +659,15 @@ export default function Dashboard() {
 
     setIsMapUploading(true);
     try {
-      // Сжимаем: исходник в несколько МБ рвёт соединение (ERR_HTTP2_PING_FAILED / Failed to fetch)
       const blob = await compressImage(file, 2560, 0.82);
       let mapUrl = '';
 
-      // 1) Пытаемся положить в Supabase Storage — в БД попадает только короткая ссылка
       const path = `${roomId}/${Date.now()}.webp`;
-      const { error: uploadError } = await supabase.storage
-        .from('maps')
-        .upload(path, blob, { contentType: blob.type, upsert: true });
+      const { error: uploadError } = await supabase.storage.from('maps').upload(path, blob, { contentType: blob.type, upsert: true });
       if (!uploadError) {
         mapUrl = supabase.storage.from('maps').getPublicUrl(path).data.publicUrl;
       } else {
         console.warn('Storage недоступен, сохраняем сжатую карту в БД:', uploadError.message);
-        // 2) Запасной вариант — сжатый base64
         mapUrl = await blobToDataUrl(blob);
       }
 
@@ -571,7 +680,6 @@ export default function Dashboard() {
         alert("Не удалось сохранить карту: " + error.message);
         return;
       }
-      // Ссылку отправляем прямо в сигнале; base64 игроки дочитают из БД
       broadcast('map_updated', mapUrl.startsWith('data:') ? {} : { url: mapUrl, grid_size: gridSize });
     } catch (err: any) {
       console.error("❌ Ошибка загрузки карты:", err);
@@ -618,7 +726,6 @@ export default function Dashboard() {
       const container = mapContainerRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
-      // Храним точки в координатах карты — тогда туман совпадает у всех, независимо от зума/сдвига/размера экрана
       const mapPoint = {
         x: (e.clientX - rect.left - mapOffset.x) / zoom,
         y: (e.clientY - rect.top - mapOffset.y) / zoom,
@@ -654,7 +761,6 @@ export default function Dashboard() {
       e.stopPropagation(); 
       return; 
     }
-    
     if (role === 'player' && token.author_nickname !== user) {
       console.log("🚫 Блокировка: игрок пытается двигать чужой токен");
       return;
@@ -666,7 +772,6 @@ export default function Dashboard() {
     setDraggedToken(token.id);
     draggedTokenRef.current = token.id;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    // Смещение курсора внутри фишки в экранных пикселях
     dragOffsetRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     setDragOffset(dragOffsetRef.current);
     
@@ -674,7 +779,6 @@ export default function Dashboard() {
     window.addEventListener('mouseup', handleGlobalMouseUp);
   };
 
-  // Используем только refs: эти функции живут на window и не видят свежий state
   const handleGlobalMouseMove = (e: MouseEvent) => {
     const id = draggedTokenRef.current;
     const container = mapContainerRef.current;
@@ -707,12 +811,8 @@ export default function Dashboard() {
     setDraggedToken(null);
     if (!token) return;
 
-    // Сразу показываем другим, затем сохраняем в БД
     broadcast('token_moved', { id, position_x: token.position_x, position_y: token.position_y });
-    const { error } = await supabase
-      .from('board_tokens')
-      .update({ position_x: token.position_x, position_y: token.position_y })
-      .eq('id', id);
+    const { error } = await supabase.from('board_tokens').update({ position_x: token.position_x, position_y: token.position_y }).eq('id', id);
     
     if (error) {
       console.error("❌ Ошибка перемещения:", error);
@@ -760,7 +860,6 @@ export default function Dashboard() {
   useEffect(() => { if (currentView === 'map') setTimeout(initCanvas, 100); }, [currentView]);
   useEffect(() => { if (currentView === 'map') redrawFogCanvas(); }, [fogPolygons, role, currentView, redrawFogCanvas]);
 
-  // ✅ ИСПРАВЛЕНО: используем refs для доступа к актуальным значениям
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space' && (currentTool === 'fog-add' || currentTool === 'fog-remove')) {
@@ -772,7 +871,6 @@ export default function Dashboard() {
             type: currentTool === 'fog-add' ? 'add' : 'remove' 
           };
           const newFogPolygons = [...fogPolygonsRef.current, newPolygon];
-          console.log("🌫️ Добавлен новый полигон тумана:", newPolygon);
           setFogPolygons(newFogPolygons);
           setCurrentFogPoints([]);
           setTimeout(() => redrawFogCanvas(), 0);
@@ -824,12 +922,9 @@ export default function Dashboard() {
   const clearFog = async () => { 
     setFogPolygons([]); 
     setCurrentFogPoints([]); 
-    if (role === 'dm') {
-      await saveFogToDatabase([]);
-    }
+    if (role === 'dm') await saveFogToDatabase([]);
   };
 
-  // Точки хранятся в координатах карты, а превью рисуется в экранных
   const fogPreview = currentFogPoints.map(p => ({ x: p.x * zoom + mapOffset.x, y: p.y * zoom + mapOffset.y }));
 
   return (
@@ -838,17 +933,74 @@ export default function Dashboard() {
         <div className="w-64 bg-gray-800 border-r border-gray-700 p-4 flex flex-col flex-shrink-0">
           <h2 className="text-xl font-bold text-amber-500 mb-4">👑 Меню Мастера</h2>
           <button onClick={() => setCurrentView('map')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'map' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🎲 Начать игру</button>
-          <button onClick={() => setCurrentView('characters')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'characters' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}> Персонажи</button>
+          <button onClick={() => setCurrentView('characters')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'characters' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>👥 Персонажи</button>
           <button onClick={() => setCurrentView('upload-map')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'upload-map' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🗺️ Загрузить карту</button>
-          <button onClick={() => { setCurrentView('lore-full'); setSelectedFolder(null); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-full' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📖 Лор (полный)</button>
-          <button onClick={() => { setCurrentView('lore-short'); setSelectedFolder(null); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-short' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📜 Краткий лор</button>
-          <button onClick={() => setCurrentView('items')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'items' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>️ Предметы</button>
+          <button onClick={() => { setCurrentView('lore-full'); fetchLoreNotes('full'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-full' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📖 Лор</button>
+          <button onClick={() => { setCurrentView('lore-short'); fetchLoreNotes('short'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-short' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📜 Краткий лор</button>
+          <button onClick={() => setCurrentView('items')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'items' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>⚔️ Предметы</button>
           <button onClick={() => setCurrentView('objects')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'objects' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🏺 Объекты</button>
           <button onClick={() => setCurrentView('proposals')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'proposals' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>💫 Пожелания</button>
-          <div className="mt-auto">
-            <h3 className="text-sm font-bold text-amber-500 mb-2">Сохранения</h3>
-            <input className="w-full p-2 bg-gray-700 rounded mb-2 text-sm" placeholder="Название" />
-            <div className="grid grid-cols-3 gap-1">{[1, 2, 3, 4, 5, 6].map(n => <button key={n} className="bg-gray-700 hover:bg-gray-600 p-2 rounded text-sm">{n}</button>)}</div>
+          
+          {/* 💾 НОВЫЙ БЛОК СОХРАНЕНИЙ */}
+          <div className="mt-auto border-t border-gray-700 pt-4">
+            <h3 className="text-sm font-bold text-amber-500 mb-2">💾 Сохранения</h3>
+            <input
+              className="w-full p-2 bg-gray-700 rounded mb-3 text-sm outline-none focus:ring-2 focus:ring-amber-500"
+              placeholder="Название сохранения"
+              value={saveName}
+              onChange={e => setSaveName(e.target.value)}
+              disabled={isSaving || isLoadingSave}
+            />
+            <p className="text-xs text-gray-400 mb-2">Сначала выберите ячейку:</p>
+            <div className="grid grid-cols-3 gap-2 mb-3">
+              {[1, 2, 3, 4, 5, 6].map(slot => {
+                const save = roomSaves.find(s => s.slot === slot);
+                const selected = selectedSaveSlot === slot;
+                return (
+                  <button
+                    key={slot}
+                    onClick={() => {
+                      setSelectedSaveSlot(slot);
+                      if (save) setSaveName(save.name);
+                      else setSaveName('');
+                    }}
+                    className={`min-h-[58px] rounded border p-2 text-left transition ${
+                      selected
+                        ? 'border-amber-400 bg-amber-600/30 ring-2 ring-amber-500'
+                        : save
+                          ? 'border-green-600 bg-gray-700 hover:bg-gray-600'
+                          : 'border-gray-600 bg-gray-700 hover:bg-gray-600'
+                    }`}
+                  >
+                    <div className="font-bold text-sm">Слот {slot}</div>
+                    {save ? (
+                      <div className="text-[10px] text-green-400 truncate mt-1">{save.name}</div>
+                    ) : (
+                      <div className="text-[10px] text-gray-500 mt-1">Пусто</div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="space-y-2">
+              <button
+                onClick={saveGame}
+                disabled={!selectedSaveSlot || isSaving || isLoadingSave}
+                className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm"
+              >
+                {isSaving ? '⏳ Сохраняем...' : `💾 Сохранить${selectedSaveSlot ? ` в слот ${selectedSaveSlot}` : ''}`}
+              </button>
+              <button
+                onClick={loadGame}
+                disabled={!selectedSaveSlot || !roomSaves.some(s => s.slot === selectedSaveSlot) || isSaving || isLoadingSave}
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm"
+              >
+                {isLoadingSave ? '⏳ Выгружаем...' : `📤 Выгрузить${selectedSaveSlot ? ` из слота ${selectedSaveSlot}` : ''}`}
+              </button>
+            </div>
+            {selectedSaveSlot && (
+              <p className="text-xs text-amber-400 mt-2 text-center">Выбран слот {selectedSaveSlot}</p>
+            )}
           </div>
         </div>
       )}
@@ -859,7 +1011,9 @@ export default function Dashboard() {
           <button onClick={() => setCurrentView('map')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'map' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🗺️ Карта</button>
           <button onClick={() => setCurrentView('characters')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'characters' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>👤 Мой персонаж</button>
           <button onClick={() => setCurrentView('items')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'items' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🎒 Предметы</button>
-          <button onClick={() => setCurrentView('proposals')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'proposals' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}> Предложение</button>
+          <button onClick={() => setCurrentView('proposals')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'proposals' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>💡 Предложение</button>
+          {/* ✅ Игрок может видеть краткий лор */}
+          <button onClick={() => { setCurrentView('lore-short'); fetchLoreNotes('short'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-short' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📜 Краткий лор</button>
         </div>
       )}
 
@@ -868,11 +1022,11 @@ export default function Dashboard() {
           <div className="flex items-center gap-4">
             {currentView !== 'main' && currentView !== 'map' && <button onClick={() => setCurrentView('main')} className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold">← Назад</button>}
             {currentView === 'map' && <button onClick={() => setCurrentView('main')} className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold">← К списку</button>}
-            <h1 className="text-2xl font-bold text-amber-500 truncate">️ Стол: {roomKey}</h1>
+            <h1 className="text-2xl font-bold text-amber-500 truncate">⚔️ Стол: {roomKey}</h1>
           </div>
           <div className="text-right">
             <p className="text-lg font-semibold">{user}</p>
-            <p className="text-sm text-gray-400 uppercase">{role === 'dm' ? '👑 Мастер' : ' Игрок'}</p>
+            <p className="text-sm text-gray-400 uppercase">{role === 'dm' ? '👑 Мастер' : '🎲 Игрок'}</p>
           </div>
         </div>
 
@@ -902,10 +1056,10 @@ export default function Dashboard() {
                   {role === 'dm' && (
                     <>
                       <button onClick={() => setCurrentTool('pan')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'pan' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>✋</button>
-                      <button onClick={() => setCurrentTool('brush')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'brush' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>️</button>
+                      <button onClick={() => setCurrentTool('brush')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'brush' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🖌️</button>
                       <button onClick={() => setCurrentTool('eraser')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'eraser' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🧹</button>
                       <button onClick={() => setCurrentTool('fog-add')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-add' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🌫️+</button>
-                      <button onClick={() => setCurrentTool('fog-remove')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-remove' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>️-</button>
+                      <button onClick={() => setCurrentTool('fog-remove')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-remove' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🌫️-</button>
                       
                       {currentTool !== 'pan' && currentTool !== 'fog-add' && currentTool !== 'fog-remove' && (
                         <>
@@ -995,13 +1149,13 @@ export default function Dashboard() {
                 <canvas ref={fogCanvasRef} width={FOG_CANVAS_SIZE} height={FOG_CANVAS_SIZE} className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', left: 0, top: 0, zIndex: 102, pointerEvents: 'none' }} />
                 
                 {role !== 'dm' && remoteFogPreview && remoteFogPreview.points.length > 1 && (
-  <svg className="absolute" style={{ left: 0, top: 0, width: '100%', height: '100%', zIndex: 103, pointerEvents: 'none' }} aria-hidden="true">
-  <polyline
-    points={remoteFogPreview.points.map(p => `${p.x * zoom + mapOffset.x},${p.y * zoom + mapOffset.y}`).join(' ')}
-    fill="none" stroke={remoteFogPreview.type === 'add' ? '#000' : '#fff'} strokeWidth={2} strokeDasharray="5,5" />
-  </svg>
-  )}
-  {role === 'dm' && (currentTool === 'fog-add' || currentTool === 'fog-remove') && currentFogPoints.length > 0 && (
+                  <svg className="absolute" style={{ left: 0, top: 0, width: '100%', height: '100%', zIndex: 103, pointerEvents: 'none' }} aria-hidden="true">
+                    <polyline
+                      points={remoteFogPreview.points.map(p => `${p.x * zoom + mapOffset.x},${p.y * zoom + mapOffset.y}`).join(' ')}
+                      fill="none" stroke={remoteFogPreview.type === 'add' ? '#000' : '#fff'} strokeWidth={2} strokeDasharray="5,5" />
+                  </svg>
+                )}
+                {role === 'dm' && (currentTool === 'fog-add' || currentTool === 'fog-remove') && currentFogPoints.length > 0 && (
                   <svg className="absolute" style={{ left: 0, top: 0, width: '100%', height: '100%', zIndex: 103, pointerEvents: 'none' }}>
                     {fogPreview.map((point, i) => { if (i === 0) return null; const prev = fogPreview[i - 1]; return <line key={`line-${i}`} x1={prev.x} y1={prev.y} x2={point.x} y2={point.y} stroke={currentTool === 'fog-add' ? '#000' : '#fff'} strokeWidth={2} strokeDasharray="5,5" />; })}
                     {mousePos && fogPreview.length > 0 && <line x1={fogPreview[fogPreview.length - 1].x} y1={fogPreview[fogPreview.length - 1].y} x2={mousePos.x} y2={mousePos.y} stroke={currentTool === 'fog-add' ? '#000' : '#fff'} strokeWidth={2} strokeDasharray="5,5" opacity={0.5} />}
@@ -1021,7 +1175,7 @@ export default function Dashboard() {
               <h2 className="text-2xl font-bold text-amber-500 mb-6">🗺️ Загрузить карту</h2>
               <div className="bg-gray-800 p-6 rounded-lg border border-gray-700">
                 <input type="file" accept="image/*" onChange={handleMapUpload} disabled={isMapUploading} className="w-full p-2 bg-gray-700 rounded mb-4 disabled:opacity-50" />
-  {isMapUploading && <p className="text-sm text-yellow-400 mb-4" role="status">Сжимаем и загружаем карту...</p>}
+                {isMapUploading && <p className="text-sm text-yellow-400 mb-4" role="status">Сжимаем и загружаем карту...</p>}
                 {mapImage && <img src={mapImage} alt="Предпросмотр" className="max-w-full h-64 object-contain border border-gray-600 rounded mb-4" />}
                 <label className="block text-sm font-bold mb-2">Размер сетки: {gridSize}px</label>
                 <input type="range" min="20" max="100" value={gridSize} onChange={(e) => {
@@ -1038,9 +1192,12 @@ export default function Dashboard() {
             <div>
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-2xl font-bold text-amber-500">{role === 'player' ? '👤 Мой персонаж' : '👥 Персонажи'}</h2>
-                <button onClick={() => setShowCharForm(true)} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">+ С��здать</button>
+                {/* ✅ Исправлено: кнопка только у Мастера, текст исправлен */}
+                {role === 'dm' && (
+                  <button onClick={() => setShowCharForm(true)} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">+ Создать</button>
+                )}
               </div>
-              {showCharForm && (
+              {showCharForm && role === 'dm' && (
                 <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 mb-6">
                   <h3 className="text-xl font-bold mb-4">Создать персонажа</h3>
                   <div className="grid grid-cols-2 gap-4 mb-4">
@@ -1196,53 +1353,71 @@ export default function Dashboard() {
             </div>
           )}
 
+          {/* ✅ НОВЫЙ БЛОК ОТОБРАЖЕНИЯ ЛОРА (без папок) */}
           {(currentView === 'lore-full' || currentView === 'lore-short') && (
-            <div>
+            <div className="max-w-4xl mx-auto">
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl font-bold text-amber-500">{currentView === 'lore-full' ? ' Лор (полный)' : ' Краткий лор'}</h2>
-                {role === 'dm' && <button onClick={() => setShowFolderForm(true)} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">+ Папка</button>}
-              </div>
-              {showFolderForm && (
-                <div className="bg-gray-800 p-4 rounded-lg border border-gray-700 mb-4">
-                  <input className="bg-gray-700 p-2 rounded w-full mb-2" placeholder="Название папки" value={newFolderName} onChange={e => setNewFolderName(e.target.value)} />
-                  <div className="flex gap-2">
-                    <button onClick={() => addLoreFolder(currentView === 'lore-full' ? 'full' : 'short')} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">Создать</button>
-                    <button onClick={() => setShowFolderForm(false)} className="bg-gray-600 hover:bg-gray-700 px-4 py-2 rounded font-bold">Отмена</button>
-                  </div>
-                </div>
-              )}
-              {!selectedFolder ? (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {loreFolders.filter(f => f.type === (currentView === 'lore-full' ? 'full' : 'short')).map(folder => (
-                    <div key={folder.id} onClick={() => { setSelectedFolder(folder.id); fetchLoreNotes(folder.id); }} className="bg-gray-800 p-4 rounded-lg border border-gray-700 cursor-pointer hover:bg-gray-700">
-                      <h3 className="text-lg font-bold"> {folder.name}</h3>
-                    </div>
-                  ))}
-                </div>
-              ) : (
                 <div>
-                  <button onClick={() => setSelectedFolder(null)} className="mb-4 text-blue-400 hover:text-blue-300">← Назад</button>
-                  {role === 'dm' && <button onClick={() => setShowNoteForm(true)} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold mb-4">+ Заметка</button>}
-                  {showNoteForm && (
-                    <div className="bg-gray-800 p-4 rounded-lg border border-gray-700 mb-4">
-                      <input className="bg-gray-700 p-2 rounded w-full mb-2" placeholder="Заголовок" value={newNote.title} onChange={e => setNewNote({ ...newNote, title: e.target.value })} />
-                      <textarea className="bg-gray-700 p-2 rounded w-full mb-2" placeholder="Содержание" value={newNote.content} onChange={e => setNewNote({ ...newNote, content: e.target.value })} rows={6} />
-                      <div className="flex gap-2">
-                        <button onClick={addLoreNote} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">Сохранить</button>
-                        <button onClick={() => setShowNoteForm(false)} className="bg-gray-600 hover:bg-gray-700 px-4 py-2 rounded font-bold">Отмена</button>
-                      </div>
-                    </div>
-                  )}
-                  <div className="space-y-4">
-                    {loreNotes.map(note => (
-                      <div key={note.id} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-                        <h3 className="text-lg font-bold mb-2">{note.title}</h3>
-                        <p className="text-gray-300 whitespace-pre-wrap">{note.content}</p>
-                      </div>
-                    ))}
+                  <h2 className="text-2xl font-bold text-amber-500">
+                    {currentView === 'lore-full' ? '📖 Лор' : '📜 Краткий лор'}
+                  </h2>
+                  <p className="text-sm text-gray-400 mt-1">
+                    {currentView === 'lore-full'
+                      ? 'Полная информация о мире кампании'
+                      : 'Информация, доступная игрокам'}
+                  </p>
+                </div>
+                {role === 'dm' && (
+                  <button
+                    onClick={() => {
+                      setNewNote({ title: '', content: '' });
+                      setShowNoteForm(true);
+                    }}
+                    className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold"
+                  >
+                    + Создать заметку
+                  </button>
+                )}
+              </div>
+
+              {role === 'dm' && showNoteForm && (
+                <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 mb-6">
+                  <h3 className="text-xl font-bold mb-4">
+                    {currentView === 'lore-full' ? 'Новая заметка в полном лоре' : 'Новая заметка в кратком лоре'}
+                  </h3>
+                  <input
+                    className="bg-gray-700 p-3 rounded w-full mb-4"
+                    placeholder="Название заметки"
+                    value={newNote.title}
+                    onChange={e => setNewNote({ ...newNote, title: e.target.value })}
+                  />
+                  <textarea
+                    className="bg-gray-700 p-3 rounded w-full mb-4"
+                    placeholder="Текст заметки..."
+                    value={newNote.content}
+                    onChange={e => setNewNote({ ...newNote, content: e.target.value })}
+                    rows={10}
+                  />
+                  <div className="flex gap-2">
+                    <button onClick={addLoreNote} className="bg-green-600 hover:bg-green-700 px-5 py-2 rounded font-bold">Сохранить</button>
+                    <button onClick={() => setShowNoteForm(false)} className="bg-gray-600 hover:bg-gray-700 px-5 py-2 rounded font-bold">Отмена</button>
                   </div>
                 </div>
               )}
+
+              <div className="space-y-4">
+                {loreNotes.length === 0 && (
+                  <div className="bg-gray-800 border border-gray-700 rounded-lg p-8 text-center">
+                    <p className="text-gray-500">Здесь пока нет заметок.</p>
+                  </div>
+                )}
+                {loreNotes.map(note => (
+                  <article key={note.id} className="bg-gray-800 p-5 rounded-lg border border-gray-700">
+                    <h3 className="text-xl font-bold text-amber-400 mb-3">{note.title}</h3>
+                    <div className="text-gray-200 whitespace-pre-wrap leading-relaxed">{note.content}</div>
+                  </article>
+                ))}
+              </div>
             </div>
           )}
         </div>
