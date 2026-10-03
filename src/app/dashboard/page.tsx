@@ -69,6 +69,7 @@ export default function Dashboard() {
   
   const [characters, setCharacters] = useState<any[]>([]);
   const [showCharForm, setShowCharForm] = useState(false);
+  const [selectedCharacter, setSelectedCharacter] = useState<string | null>(null); // ✅ НОВОЕ
   const [newChar, setNewChar] = useState({ name: '', race: '', strength: 10, dexterity: 10, constitution: 10, intelligence: 10, wisdom: 10, charisma: 10, hit_points: 10, armor_class: 10, spells: '', description: '', image_url: '' });
 
   const [items, setItems] = useState<any[]>([]);
@@ -79,7 +80,6 @@ export default function Dashboard() {
   const [showObjForm, setShowObjForm] = useState(false);
   const [newObj, setNewObj] = useState({ name: '', description: '', image_url: '', grid_size: 1 });
 
-  // 📜 ЛОР: Убраны папки, оставлены только заметки
   const [loreNotes, setLoreNotes] = useState<any[]>([]);
   const [showNoteForm, setShowNoteForm] = useState(false);
   const [newNote, setNewNote] = useState({ title: '', content: '' });
@@ -111,14 +111,12 @@ export default function Dashboard() {
   const [diceHistory, setDiceHistory] = useState<DiceRoll[]>([]);
   const [isDicePanelOpen, setIsDicePanelOpen] = useState(true);
 
-  // 💾 СОХРАНЕНИЯ: Новые состояния
   const [saveName, setSaveName] = useState('');
   const [selectedSaveSlot, setSelectedSaveSlot] = useState<number | null>(null);
   const [roomSaves, setRoomSaves] = useState<RoomSave[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingSave, setIsLoadingSave] = useState(false);
 
-  // Refs
   const fogPolygonsRef = useRef(fogPolygons);
   const currentFogPointsRef = useRef(currentFogPoints);
   const boardTokensRef = useRef<any[]>([]);
@@ -201,7 +199,6 @@ export default function Dashboard() {
     }
   }, []);
 
-  // ✅ Обновлено: добавлен lore_notes, удален lore_folders
   const tableSetters: Record<string, (rows: any[]) => void> = {
     characters: setCharacters,
     items: setItems,
@@ -226,28 +223,15 @@ export default function Dashboard() {
     setter(data);
   }, []);
 
-  // 💾 Загрузка сохранений
   const loadRoomSaves = useCallback(async (id: string) => {
-    const { data, error } = await supabase
-      .from('room_saves')
-      .select('*')
-      .eq('room_id', id)
-      .order('slot', { ascending: true });
-
-    if (error) {
-      console.error('Ошибка загрузки сохранений:', error);
-      return;
-    }
+    const { data, error } = await supabase.from('room_saves').select('*').eq('room_id', id).order('slot', { ascending: true });
+    if (error) { console.error('Ошибка загрузки сохранений:', error); return; }
     setRoomSaves(data || []);
   }, []);
 
   const initRoom = async (savedUser: string) => {
     const { data: room, error: roomError } = await supabase.from('rooms').select('*').eq('room_key', roomKey).single();
-
-    if (roomError || !room) {
-      console.error("❌ Ошибка поиска комнаты:", roomError);
-      return;
-    }
+    if (roomError || !room) { console.error("❌ Ошибка поиска комнаты:", roomError); return; }
 
     setRoomId(room.id);
     const isDM = room.dm_id === savedUser;
@@ -255,43 +239,19 @@ export default function Dashboard() {
     setRole(userRole);
     localStorage.setItem('dnd_role', userRole);
 
-    await supabase.from('room_participants').upsert({
-      room_id: room.id,
-      user_nickname: savedUser,
-      role: userRole
-    }, { onConflict: 'room_id,user_nickname' });
+    await supabase.from('room_participants').upsert({ room_id: room.id, user_nickname: savedUser, role: userRole }, { onConflict: 'room_id,user_nickname' });
 
     setMapImage(room.map_image || '');
     setGridSize(room.grid_size || 40);
+    if (room.fog_data && Array.isArray(room.fog_data)) setFogPolygons(room.fog_data);
+    else setFogPolygons([]);
     
-    if (room.fog_data && Array.isArray(room.fog_data)) {
-      setFogPolygons(room.fog_data);
-    } else {
-      setFogPolygons([]);
-    }
-    
-    // ✅ Обновлено: убран lore_folders из select
     const { data: roomData, error: dataError } = await supabase
       .from('rooms')
-      .select(`
-        *,
-        room_participants (*),
-        entities (*),
-        proposals (*),
-        characters (*),
-        items (*),
-        objects (*),
-        lore_notes (*),
-        board_tokens (*),
-        dice_rolls (*)
-      `)
-      .eq('id', room.id)
-      .single();
+      .select(`*, room_participants (*), entities (*), proposals (*), characters (*), items (*), objects (*), lore_notes (*), board_tokens (*), dice_rolls (*)`)
+      .eq('id', room.id).single();
 
-    if (dataError) {
-      console.error("❌ Ошибка загрузки данных комнаты:", dataError);
-      return;
-    }
+    if (dataError) { console.error("❌ Ошибка загрузки данных комнаты:", dataError); return; }
 
     setParticipants(roomData.room_participants || []);
     setEntities(roomData.entities || []);
@@ -299,11 +259,9 @@ export default function Dashboard() {
     setCharacters(roomData.characters || []);
     setItems(roomData.items || []);
     setObjects(roomData.objects || []);
-    setLoreNotes(roomData.lore_notes || []); // ✅ Обновлено
+    setLoreNotes(roomData.lore_notes || []);
     setBoardTokens(roomData.board_tokens || []);
     setDiceHistory(roomData.dice_rolls || []);
-
-    // 💾 Загружаем сохранения при инициализации
     await loadRoomSaves(room.id);
   };
 
@@ -315,17 +273,14 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!roomId) return;
-
     const channel = supabase.channel(`room-sync-${roomId}`, { config: { broadcast: { self: false } } });
-
-    // ✅ Обновлено: убран lore_folders из listTables
     const listTables = ['room_participants', 'characters', 'items', 'objects', 'entities', 'lore_notes', 'proposals'];
+    
     listTables.forEach(table => {
       const setter = tableSetters[table] as any;
       channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `room_id=eq.${roomId}` }, (payload: any) => {
-        if (payload.eventType === 'DELETE') {
-          setter((prev: any[]) => prev.filter(x => x.id !== payload.old?.id));
-        } else if (payload.new?.id !== undefined) {
+        if (payload.eventType === 'DELETE') setter((prev: any[]) => prev.filter(x => x.id !== payload.old?.id));
+        else if (payload.new?.id !== undefined) {
           if (payload.errors?.length) reloadTable(table, roomId);
           else setter((prev: any[]) => upsertById(prev, payload.new));
         }
@@ -337,17 +292,11 @@ export default function Dashboard() {
         setDiceHistory(prev => (prev.some(r => r.id === (payload.new as any).id) ? prev : [payload.new as any, ...prev]));
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'board_tokens', filter: `room_id=eq.${roomId}` }, (payload: any) => {
-        if (payload.eventType === 'DELETE') {
-          setBoardTokens(prev => prev.filter(t => t.id !== payload.old?.id));
-          return;
-        }
+        if (payload.eventType === 'DELETE') { setBoardTokens(prev => prev.filter(t => t.id !== payload.old?.id)); return; }
         const row = payload.new;
         if (!row?.id) return;
         if (row.id === draggedTokenRef.current) return;
-        if (payload.errors?.length) {
-          reloadTable('board_tokens', roomId);
-          return;
-        }
+        if (payload.errors?.length) { reloadTable('board_tokens', roomId); return; }
         setBoardTokens(prev => upsertById(prev, row));
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` }, (payload: any) => {
@@ -356,42 +305,19 @@ export default function Dashboard() {
           setMapImage(row.map_image || '');
           if (row.grid_size) setGridSize(row.grid_size);
           applyFog(row.fog_data);
-        } else {
-          reloadRoomLight(roomId);
-        }
+        } else { reloadRoomLight(roomId); }
       })
       .on('broadcast', { event: 'map_updated' }, ({ payload }) => {
-        if (payload?.url) {
-          setMapImage(payload.url);
-          if (payload.grid_size) setGridSize(payload.grid_size);
-        } else {
-          reloadRoomState(roomId);
-        }
+        if (payload?.url) { setMapImage(payload.url); if (payload.grid_size) setGridSize(payload.grid_size); }
+        else { reloadRoomState(roomId); }
       })
-      .on('broadcast', { event: 'fog_preview' }, ({ payload }) => {
-        setRemoteFogPreview(Array.isArray(payload?.points) ? payload : null);
-      })
-      .on('broadcast', { event: 'brush_strokes' }, ({ payload }) => {
-        if (Array.isArray(payload?.strokes)) payload.strokes.forEach(drawRemoteStroke);
-      })
-      .on('broadcast', { event: 'brush_clear' }, () => {
-        const canvas = canvasRef.current, ctx = canvas?.getContext('2d');
-        if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      })
-      .on('broadcast', { event: 'token_moved' }, ({ payload }) => {
-        if (payload.id === draggedTokenRef.current) return;
-        setBoardTokens(prev => prev.map(t => (t.id === payload.id ? { ...t, ...payload } : t)));
-      })
-      .on('broadcast', { event: 'fog_updated' }, ({ payload }) => {
-        if (Array.isArray(payload.fog)) setFogPolygons(payload.fog);
-        setRemoteFogPreview(null);
-      })
-      .on('broadcast', { event: 'room_updated' }, () => {
-        reloadRoomState(roomId);
-      })
-      .on('broadcast', { event: 'table_changed' }, ({ payload }) => {
-        if (payload?.table) reloadTable(payload.table, roomId);
-      })
+      .on('broadcast', { event: 'fog_preview' }, ({ payload }) => { setRemoteFogPreview(Array.isArray(payload?.points) ? payload : null); })
+      .on('broadcast', { event: 'brush_strokes' }, ({ payload }) => { if (Array.isArray(payload?.strokes)) payload.strokes.forEach(drawRemoteStroke); })
+      .on('broadcast', { event: 'brush_clear' }, () => { const canvas = canvasRef.current, ctx = canvas?.getContext('2d'); if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height); })
+      .on('broadcast', { event: 'token_moved' }, ({ payload }) => { if (payload.id === draggedTokenRef.current) return; setBoardTokens(prev => prev.map(t => (t.id === payload.id ? { ...t, ...payload } : t))); })
+      .on('broadcast', { event: 'fog_updated' }, ({ payload }) => { if (Array.isArray(payload.fog)) setFogPolygons(payload.fog); setRemoteFogPreview(null); })
+      .on('broadcast', { event: 'room_updated' }, () => { reloadRoomState(roomId); })
+      .on('broadcast', { event: 'table_changed' }, ({ payload }) => { if (payload?.table) reloadTable(payload.table, roomId); })
       .subscribe((status) => {
         isChannelReadyRef.current = status === 'SUBSCRIBED';
         if (status === 'SUBSCRIBED') {
@@ -404,12 +330,7 @@ export default function Dashboard() {
       });
 
     channelRef.current = channel;
-
-    return () => {
-      isChannelReadyRef.current = false;
-      channelRef.current = null;
-      supabase.removeChannel(channel);
-    };
+    return () => { isChannelReadyRef.current = false; channelRef.current = null; supabase.removeChannel(channel); };
   }, [roomId, reloadRoomState, reloadRoomLight, reloadTable]);
 
   const saveFogToDatabase = useCallback(async (newFogPolygons: FogPolygon[]) => {
@@ -421,17 +342,8 @@ export default function Dashboard() {
 
   const fetchLoreNotes = async (type: 'full' | 'short') => {
     if (!roomId) return;
-    const { data, error } = await supabase
-      .from('lore_notes')
-      .select('*')
-      .eq('room_id', roomId)
-      .eq('lore_type', type)
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      console.error('Ошибка загрузки лора:', error);
-      return;
-    }
+    const { data, error } = await supabase.from('lore_notes').select('*').eq('room_id', roomId).eq('lore_type', type).order('created_at', { ascending: false });
+    if (error) { console.error('Ошибка загрузки лора:', error); return; }
     setLoreNotes(data || []);
   };
 
@@ -445,10 +357,7 @@ export default function Dashboard() {
   const rollDice = async (sides: number, count: number = 1, modifier: number = 0, throwerName?: string) => {
     const rolls = Array.from({ length: count }, () => Math.floor(Math.random() * sides) + 1);
     const total = rolls.reduce((a, b) => a + b, 0) + modifier;
-    const { error } = await supabase.from('dice_rolls').insert({ 
-      room_id: roomId, user_nickname: throwerName || user, dice: `${count}d${sides}`, 
-      rolls: JSON.stringify(rolls), modifier, total 
-    });
+    const { error } = await supabase.from('dice_rolls').insert({ room_id: roomId, user_nickname: throwerName || user, dice: `${count}d${sides}`, rolls: JSON.stringify(rolls), modifier, total });
     if (error) return alert("Ошибка броска: " + error.message);
   };
 
@@ -459,10 +368,7 @@ export default function Dashboard() {
 
   const insertAndSync = async (table: string, newData: any) => {
     const { data, error } = await supabase.from(table).insert(newData).select().single();
-    if (error) {
-      alert("Ошибка: " + error.message);
-      return null;
-    }
+    if (error) { alert("Ошибка: " + error.message); return null; }
     const setter = tableSetters[table] as any;
     if (setter && data) setter((prev: any[]) => upsertById(prev, data));
     broadcast('table_changed', { table });
@@ -474,7 +380,68 @@ export default function Dashboard() {
     const newData = { room_id: roomId, ...newChar, image_url: newChar.image_url || '', author_nickname: user };
     if (!(await insertAndSync('characters', newData))) return;
     setShowCharForm(false);
+    setSelectedCharacter(null);
     setNewChar({ name: '', race: '', strength: 10, dexterity: 10, constitution: 10, intelligence: 10, wisdom: 10, charisma: 10, hit_points: 10, armor_class: 10, spells: '', description: '', image_url: '' });
+  };
+
+  // ✅ НОВАЯ ФУНКЦИЯ: Редактирование персонажа
+  const updateCharacter = async () => {
+    if (!newChar.name.trim()) return alert("Введите имя!");
+    if (!selectedCharacter) return;
+
+    const character = characters.find(c => c.id === selectedCharacter);
+    if (!character) return alert("Персонаж не найден.");
+
+    if (role === 'player' && character.author_nickname !== user) {
+      return alert("Вы можете редактировать только своего персонажа.");
+    }
+
+    const updates = {
+      name: newChar.name.trim(), race: newChar.race, strength: newChar.strength,
+      dexterity: newChar.dexterity, constitution: newChar.constitution,
+      intelligence: newChar.intelligence, wisdom: newChar.wisdom,
+      charisma: newChar.charisma, hit_points: newChar.hit_points,
+      armor_class: newChar.armor_class, spells: newChar.spells,
+      description: newChar.description, image_url: newChar.image_url || '',
+    };
+
+    const { data, error } = await supabase
+      .from('characters')
+      .update(updates)
+      .eq('id', selectedCharacter)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Ошибка редактирования персонажа:', error);
+      alert('Не удалось сохранить изменения: ' + error.message);
+      return;
+    }
+
+    setCharacters(prev => prev.map(c => c.id === selectedCharacter ? { ...c, ...data } : c));
+    broadcast('table_changed', { table: 'characters' });
+
+    setShowCharForm(false);
+    setSelectedCharacter(null);
+    setNewChar({ name: '', race: '', strength: 10, dexterity: 10, constitution: 10, intelligence: 10, wisdom: 10, charisma: 10, hit_points: 10, armor_class: 10, spells: '', description: '', image_url: '' });
+  };
+
+  // ✅ НОВАЯ ФУНКЦИЯ: Открытие редактора
+  const editCharacter = (char: any) => {
+    if (role === 'player' && char.author_nickname !== user) {
+      return alert("Вы можете редактировать только своего персонажа.");
+    }
+
+    setSelectedCharacter(char.id);
+    setNewChar({
+      name: char.name || '', race: char.race || '', strength: char.strength ?? 10,
+      dexterity: char.dexterity ?? 10, constitution: char.constitution ?? 10,
+      intelligence: char.intelligence ?? 10, wisdom: char.wisdom ?? 10,
+      charisma: char.charisma ?? 10, hit_points: char.hit_points ?? 10,
+      armor_class: char.armor_class ?? 10, spells: char.spells || '',
+      description: char.description || '', image_url: char.image_url || '',
+    });
+    setShowCharForm(true);
   };
 
   const addCharToBoard = async (char: any) => {
@@ -511,55 +478,22 @@ export default function Dashboard() {
   const raiseTokenLayer = (token: any) => setTokenLayer(token, Math.min((token.layer || 10) + 1, 99));
   const lowerTokenLayer = (token: any) => setTokenLayer(token, Math.max((token.layer || 10) - 1, 1));
 
-  // ✅ Обновлено: создание заметки без папок
   const addLoreNote = async () => {
     if (!newNote.title.trim()) return alert('Введите название заметки!');
     if (!newNote.content.trim()) return alert('Введите текст заметки!');
-
     const type = currentView === 'lore-short' ? 'short' : 'full';
-
-    const { data, error } = await supabase
-      .from('lore_notes')
-      .insert({
-        room_id: roomId,
-        lore_type: type,
-        title: newNote.title.trim(),
-        content: newNote.content,
-        author_nickname: user,
-      })
-      .select()
-      .single();
-
-    if (error) {
-      alert('Ошибка создания заметки: ' + error.message);
-      return;
-    }
-
+    const { data, error } = await supabase.from('lore_notes').insert({ room_id: roomId, lore_type: type, title: newNote.title.trim(), content: newNote.content, author_nickname: user }).select().single();
+    if (error) { alert('Ошибка создания заметки: ' + error.message); return; }
     setLoreNotes(prev => [data, ...prev]);
     setShowNoteForm(false);
     setNewNote({ title: '', content: '' });
     broadcast('table_changed', { table: 'lore_notes' });
   };
 
-  // 💾 Механика сохранения
   const createSaveSnapshot = () => {
     return {
-      map_image: mapImage,
-      grid_size: gridSize,
-      fog_data: fogPolygons,
-      board_tokens: boardTokens.map(token => ({
-        id: token.id,
-        room_id: token.room_id,
-        token_type: token.token_type,
-        token_id: token.token_id,
-        name: token.name,
-        image_url: token.image_url,
-        grid_size: token.grid_size,
-        position_x: token.position_x,
-        position_y: token.position_y,
-        layer: token.layer,
-        author_nickname: token.author_nickname,
-      })),
+      map_image: mapImage, grid_size: gridSize, fog_data: fogPolygons,
+      board_tokens: boardTokens.map(token => ({ id: token.id, room_id: token.room_id, token_type: token.token_type, token_id: token.token_id, name: token.name, image_url: token.image_url, grid_size: token.grid_size, position_x: token.position_x, position_y: token.position_y, layer: token.layer, author_nickname: token.author_nickname })),
     };
   };
 
@@ -568,67 +502,31 @@ export default function Dashboard() {
     if (!roomId) return alert('Комната ещё не загружена.');
     if (!selectedSaveSlot) return alert('Сначала выберите ячейку сохранения.');
     if (!saveName.trim()) return alert('Введите название сохранения.');
-
     setIsSaving(true);
     try {
       const snapshot = createSaveSnapshot();
-      const { data, error } = await supabase
-        .from('room_saves')
-        .upsert(
-          {
-            room_id: roomId,
-            slot: selectedSaveSlot,
-            name: saveName.trim(),
-            save_data: snapshot,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'room_id,slot' }
-        )
-        .select()
-        .single();
-
-      if (error) {
-        console.error('Ошибка сохранения:', error);
-        alert('Не удалось сохранить игру: ' + error.message);
-        return;
-      }
-
-      setRoomSaves(prev => {
-        const filtered = prev.filter(s => s.slot !== selectedSaveSlot);
-        return [...filtered, data].sort((a, b) => a.slot - b.slot);
-      });
+      const { data, error } = await supabase.from('room_saves').upsert({ room_id: roomId, slot: selectedSaveSlot, name: saveName.trim(), save_data: snapshot, updated_at: new Date().toISOString() }, { onConflict: 'room_id,slot' }).select().single();
+      if (error) { console.error('Ошибка сохранения:', error); alert('Не удалось сохранить игру: ' + error.message); return; }
+      setRoomSaves(prev => { const filtered = prev.filter(s => s.slot !== selectedSaveSlot); return [...filtered, data].sort((a, b) => a.slot - b.slot); });
       alert(`Игра сохранена в ячейку ${selectedSaveSlot}.`);
-    } finally {
-      setIsSaving(false);
-    }
+    } finally { setIsSaving(false); }
   };
 
-  // 💾 Механика загрузки
   const loadGame = async () => {
     if (role !== 'dm') return alert('Только Мастер может загружать сохранение.');
     if (!selectedSaveSlot) return alert('Выберите ячейку для чтения.');
-
     const save = roomSaves.find(s => s.slot === selectedSaveSlot);
     if (!save) return alert('В этой ячейке нет сохранения.');
     if (!confirm(`Выгрузить сохранение «${save.name}»?`)) return;
-
     setIsLoadingSave(true);
     try {
       const data = save.save_data;
       if (!data) return alert('Сохранение повреждено.');
-
       if (data.map_image !== undefined) setMapImage(data.map_image || '');
       if (data.grid_size) setGridSize(data.grid_size);
-
       const restoredFog = Array.isArray(data.fog_data) ? data.fog_data : [];
       setFogPolygons(restoredFog);
-
-      await supabase.from('rooms').update({
-        map_image: data.map_image || '',
-        grid_size: data.grid_size || 40,
-        fog_data: restoredFog,
-      }).eq('id', roomId);
-
+      await supabase.from('rooms').update({ map_image: data.map_image || '', grid_size: data.grid_size || 40, fog_data: restoredFog }).eq('id', roomId);
       if (Array.isArray(data.board_tokens)) {
         await supabase.from('board_tokens').delete().eq('room_id', roomId);
         if (data.board_tokens.length > 0) {
@@ -639,73 +537,46 @@ export default function Dashboard() {
         setBoardTokens(data.board_tokens);
         boardTokensRef.current = data.board_tokens;
       }
-
       broadcast('room_updated');
       broadcast('fog_updated', { fog: restoredFog });
       broadcast('table_changed', { table: 'board_tokens' });
-
       alert(`Сохранение «${save.name}» выгружено.`);
     } catch (error: any) {
       console.error('Ошибка загрузки сохранения:', error);
       alert('Не удалось выгрузить сохранение: ' + error.message);
-    } finally {
-      setIsLoadingSave(false);
-    }
+    } finally { setIsLoadingSave(false); }
   };
 
   const handleMapUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !roomId) return alert("Ошибка: выберите файл или дождитесь загрузки комнаты");
-
     setIsMapUploading(true);
     try {
       const blob = await compressImage(file, 2560, 0.82);
       let mapUrl = '';
-
       const path = `${roomId}/${Date.now()}.webp`;
       const { error: uploadError } = await supabase.storage.from('maps').upload(path, blob, { contentType: blob.type, upsert: true });
-      if (!uploadError) {
-        mapUrl = supabase.storage.from('maps').getPublicUrl(path).data.publicUrl;
-      } else {
-        console.warn('Storage недоступен, сохраняем сжатую карту в БД:', uploadError.message);
-        mapUrl = await blobToDataUrl(blob);
-      }
-
+      if (!uploadError) { mapUrl = supabase.storage.from('maps').getPublicUrl(path).data.publicUrl; }
+      else { console.warn('Storage недоступен, сохраняем сжатую карту в БД:', uploadError.message); mapUrl = await blobToDataUrl(blob); }
       setMapImage(mapUrl);
       setCurrentView('map');
-
       const { error } = await supabase.from('rooms').update({ map_image: mapUrl, grid_size: gridSize }).eq('id', roomId);
-      if (error) {
-        console.error("❌ Ошибка сохранения карты:", error);
-        alert("Не удалось сохранить карту: " + error.message);
-        return;
-      }
+      if (error) { console.error("❌ Ошибка сохранения карты:", error); alert("Не удалось сохранить карту: " + error.message); return; }
       broadcast('map_updated', mapUrl.startsWith('data:') ? {} : { url: mapUrl, grid_size: gridSize });
     } catch (err: any) {
       console.error("❌ Ошибка загрузки карты:", err);
       alert("Не удалось загрузить карту: " + (err?.message || err));
-    } finally {
-      setIsMapUploading(false);
-      e.target.value = '';
-    }
+    } finally { setIsMapUploading(false); e.target.value = ''; }
   };
 
   const handleCharImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => setNewChar({ ...newChar, image_url: event.target?.result as string });
-      reader.readAsDataURL(file);
-    }
+    if (file) { const reader = new FileReader(); reader.onload = (event) => setNewChar({ ...newChar, image_url: event.target?.result as string }); reader.readAsDataURL(file); }
   };
 
   const handleObjImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => setNewObj({ ...newObj, image_url: event.target?.result as string });
-      reader.readAsDataURL(file);
-    }
+    if (file) { const reader = new FileReader(); reader.onload = (event) => setNewObj({ ...newObj, image_url: event.target?.result as string }); reader.readAsDataURL(file); }
   };
 
   const handleWheel = (e: React.WheelEvent) => {
@@ -726,10 +597,7 @@ export default function Dashboard() {
       const container = mapContainerRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
-      const mapPoint = {
-        x: (e.clientX - rect.left - mapOffset.x) / zoom,
-        y: (e.clientY - rect.top - mapOffset.y) / zoom,
-      };
+      const mapPoint = { x: (e.clientX - rect.left - mapOffset.x) / zoom, y: (e.clientY - rect.top - mapOffset.y) / zoom };
       const nextPoints = [...currentFogPointsRef.current, mapPoint];
       currentFogPointsRef.current = nextPoints;
       setCurrentFogPoints(nextPoints);
@@ -752,29 +620,17 @@ export default function Dashboard() {
     }
   };
 
-  const handleMapMouseUp = () => {
-    setIsPanning(false);
-  };
+  const handleMapMouseUp = () => { setIsPanning(false); };
 
   const handleTokenMouseDown = (e: React.MouseEvent, token: any) => {
-    if ((e.target as HTMLElement).closest('.layer-controls')) { 
-      e.stopPropagation(); 
-      return; 
-    }
-    if (role === 'player' && token.author_nickname !== user) {
-      console.log("🚫 Блокировка: игрок пытается двигать чужой токен");
-      return;
-    }
-
-    e.stopPropagation(); 
-    e.preventDefault();
-    setSelectedToken(token.id); 
-    setDraggedToken(token.id);
+    if ((e.target as HTMLElement).closest('.layer-controls')) { e.stopPropagation(); return; }
+    if (role === 'player' && token.author_nickname !== user) { console.log("🚫 Блокировка: игрок пытается двигать чужой токен"); return; }
+    e.stopPropagation(); e.preventDefault();
+    setSelectedToken(token.id); setDraggedToken(token.id);
     draggedTokenRef.current = token.id;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     dragOffsetRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     setDragOffset(dragOffsetRef.current);
-    
     window.addEventListener('mousemove', handleGlobalMouseMove);
     window.addEventListener('mouseup', handleGlobalMouseUp);
   };
@@ -783,7 +639,6 @@ export default function Dashboard() {
     const id = draggedTokenRef.current;
     const container = mapContainerRef.current;
     if (!id || !container) return;
-    
     const rect = container.getBoundingClientRect();
     const offset = mapOffsetRef.current;
     const z = zoomRef.current;
@@ -792,10 +647,7 @@ export default function Dashboard() {
     const y = (e.clientY - rect.top - offset.y - dragOffsetRef.current.y) / z;
     const snappedX = Math.round(x / grid) * grid;
     const snappedY = Math.round(y / grid) * grid;
-    
-    const next = boardTokensRef.current.map(t =>
-      t.id === id ? { ...t, position_x: snappedX, position_y: snappedY } : t
-    );
+    const next = boardTokensRef.current.map(t => t.id === id ? { ...t, position_x: snappedX, position_y: snappedY } : t);
     boardTokensRef.current = next;
     setBoardTokens(next);
   };
@@ -803,30 +655,22 @@ export default function Dashboard() {
   const handleGlobalMouseUp = async () => {
     window.removeEventListener('mousemove', handleGlobalMouseMove);
     window.removeEventListener('mouseup', handleGlobalMouseUp);
-
     const id = draggedTokenRef.current;
     if (!id) return;
     const token = boardTokensRef.current.find(t => t.id === id);
     draggedTokenRef.current = null;
     setDraggedToken(null);
     if (!token) return;
-
     broadcast('token_moved', { id, position_x: token.position_x, position_y: token.position_y });
     const { error } = await supabase.from('board_tokens').update({ position_x: token.position_x, position_y: token.position_y }).eq('id', id);
-    
-    if (error) {
-      console.error("❌ Ошибка перемещения:", error);
-      alert("Не удалось переместить: " + error.message);
-    }
+    if (error) { console.error("❌ Ошибка перемещения:", error); alert("Не удалось переместить: " + error.message); }
   };
 
   const initCanvas = () => {
     const canvas = canvasRef.current;
     if (canvas) {
       const container = canvas.parentElement;
-      if (container) {
-        canvas.width = container.clientWidth * 2; canvas.height = container.clientHeight * 2;
-      }
+      if (container) { canvas.width = container.clientWidth * 2; canvas.height = container.clientHeight * 2; }
       const ctx = canvas.getContext('2d');
       if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
@@ -845,15 +689,8 @@ export default function Dashboard() {
       ctx.moveTo(polygon.points[0].x, polygon.points[0].y);
       for (let i = 1; i < polygon.points.length; i++) ctx.lineTo(polygon.points[i].x, polygon.points[i].y);
       ctx.closePath();
-      if (polygon.type === 'add') {
-        ctx.fillStyle = `rgba(0, 0, 0, ${role === 'dm' ? 0.5 : 1.0})`;
-        ctx.fill();
-      } else {
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.fillStyle = 'rgba(0, 0, 0, 1)';
-        ctx.fill();
-        ctx.globalCompositeOperation = 'source-over';
-      }
+      if (polygon.type === 'add') { ctx.fillStyle = `rgba(0, 0, 0, ${role === 'dm' ? 0.5 : 1.0})`; ctx.fill(); }
+      else { ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = 'rgba(0, 0, 0, 1)'; ctx.fill(); ctx.globalCompositeOperation = 'source-over'; }
     });
   }, [fogPolygons, role]);
 
@@ -866,18 +703,13 @@ export default function Dashboard() {
         e.preventDefault();
         const points = currentFogPointsRef.current;
         if (points.length >= 2) {
-          const newPolygon: FogPolygon = { 
-            points: [...points], 
-            type: currentTool === 'fog-add' ? 'add' : 'remove' 
-          };
+          const newPolygon: FogPolygon = { points: [...points], type: currentTool === 'fog-add' ? 'add' : 'remove' };
           const newFogPolygons = [...fogPolygonsRef.current, newPolygon];
           setFogPolygons(newFogPolygons);
           setCurrentFogPoints([]);
           setTimeout(() => redrawFogCanvas(), 0);
           saveFogToDatabase(newFogPolygons);
-        } else { 
-          setCurrentFogPoints([]); 
-        }
+        } else { setCurrentFogPoints([]); }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -904,26 +736,13 @@ export default function Dashboard() {
     ctx.strokeStyle = currentTool === 'eraser' ? 'rgba(0,0,0,0)' : brushColor;
     ctx.lineWidth = brushSize; ctx.lineCap = 'round'; ctx.stroke();
     const rect = canvas!.getBoundingClientRect();
-    queueStroke({
-      x1: lastPos.current.x / rect.width, y1: lastPos.current.y / rect.height,
-      x2: pos.x / rect.width, y2: pos.y / rect.height,
-      color: brushColor, size: brushSize, eraser: currentTool === 'eraser',
-    });
+    queueStroke({ x1: lastPos.current.x / rect.width, y1: lastPos.current.y / rect.height, x2: pos.x / rect.width, y2: pos.y / rect.height, color: brushColor, size: brushSize, eraser: currentTool === 'eraser' });
     lastPos.current = pos;
   };
 
   const stopDrawing = () => { setIsDrawing(false); lastPos.current = null; };
-  const clearCanvas = () => {
-    const canvas = canvasRef.current, ctx = canvas?.getContext('2d');
-    if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
-    broadcast('brush_clear');
-  };
-  
-  const clearFog = async () => { 
-    setFogPolygons([]); 
-    setCurrentFogPoints([]); 
-    if (role === 'dm') await saveFogToDatabase([]);
-  };
+  const clearCanvas = () => { const canvas = canvasRef.current, ctx = canvas?.getContext('2d'); if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height); broadcast('brush_clear'); };
+  const clearFog = async () => { setFogPolygons([]); setCurrentFogPoints([]); if (role === 'dm') await saveFogToDatabase([]); };
 
   const fogPreview = currentFogPoints.map(p => ({ x: p.x * zoom + mapOffset.x, y: p.y * zoom + mapOffset.y }));
 
@@ -941,66 +760,27 @@ export default function Dashboard() {
           <button onClick={() => setCurrentView('objects')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'objects' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🏺 Объекты</button>
           <button onClick={() => setCurrentView('proposals')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'proposals' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>💫 Пожелания</button>
           
-          {/* 💾 НОВЫЙ БЛОК СОХРАНЕНИЙ */}
           <div className="mt-auto border-t border-gray-700 pt-4">
             <h3 className="text-sm font-bold text-amber-500 mb-2">💾 Сохранения</h3>
-            <input
-              className="w-full p-2 bg-gray-700 rounded mb-3 text-sm outline-none focus:ring-2 focus:ring-amber-500"
-              placeholder="Название сохранения"
-              value={saveName}
-              onChange={e => setSaveName(e.target.value)}
-              disabled={isSaving || isLoadingSave}
-            />
+            <input className="w-full p-2 bg-gray-700 rounded mb-3 text-sm outline-none focus:ring-2 focus:ring-amber-500" placeholder="Название сохранения" value={saveName} onChange={e => setSaveName(e.target.value)} disabled={isSaving || isLoadingSave} />
             <p className="text-xs text-gray-400 mb-2">Сначала выберите ячейку:</p>
             <div className="grid grid-cols-3 gap-2 mb-3">
               {[1, 2, 3, 4, 5, 6].map(slot => {
                 const save = roomSaves.find(s => s.slot === slot);
                 const selected = selectedSaveSlot === slot;
                 return (
-                  <button
-                    key={slot}
-                    onClick={() => {
-                      setSelectedSaveSlot(slot);
-                      if (save) setSaveName(save.name);
-                      else setSaveName('');
-                    }}
-                    className={`min-h-[58px] rounded border p-2 text-left transition ${
-                      selected
-                        ? 'border-amber-400 bg-amber-600/30 ring-2 ring-amber-500'
-                        : save
-                          ? 'border-green-600 bg-gray-700 hover:bg-gray-600'
-                          : 'border-gray-600 bg-gray-700 hover:bg-gray-600'
-                    }`}
-                  >
+                  <button key={slot} onClick={() => { setSelectedSaveSlot(slot); if (save) setSaveName(save.name); else setSaveName(''); }} className={`min-h-[58px] rounded border p-2 text-left transition ${selected ? 'border-amber-400 bg-amber-600/30 ring-2 ring-amber-500' : save ? 'border-green-600 bg-gray-700 hover:bg-gray-600' : 'border-gray-600 bg-gray-700 hover:bg-gray-600'}`}>
                     <div className="font-bold text-sm">Слот {slot}</div>
-                    {save ? (
-                      <div className="text-[10px] text-green-400 truncate mt-1">{save.name}</div>
-                    ) : (
-                      <div className="text-[10px] text-gray-500 mt-1">Пусто</div>
-                    )}
+                    {save ? <div className="text-[10px] text-green-400 truncate mt-1">{save.name}</div> : <div className="text-[10px] text-gray-500 mt-1">Пусто</div>}
                   </button>
                 );
               })}
             </div>
             <div className="space-y-2">
-              <button
-                onClick={saveGame}
-                disabled={!selectedSaveSlot || isSaving || isLoadingSave}
-                className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm"
-              >
-                {isSaving ? '⏳ Сохраняем...' : `💾 Сохранить${selectedSaveSlot ? ` в слот ${selectedSaveSlot}` : ''}`}
-              </button>
-              <button
-                onClick={loadGame}
-                disabled={!selectedSaveSlot || !roomSaves.some(s => s.slot === selectedSaveSlot) || isSaving || isLoadingSave}
-                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm"
-              >
-                {isLoadingSave ? '⏳ Выгружаем...' : `📤 Выгрузить${selectedSaveSlot ? ` из слота ${selectedSaveSlot}` : ''}`}
-              </button>
+              <button onClick={saveGame} disabled={!selectedSaveSlot || isSaving || isLoadingSave} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm">{isSaving ? '⏳ Сохраняем...' : `💾 Сохранить${selectedSaveSlot ? ` в слот ${selectedSaveSlot}` : ''}`}</button>
+              <button onClick={loadGame} disabled={!selectedSaveSlot || !roomSaves.some(s => s.slot === selectedSaveSlot) || isSaving || isLoadingSave} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm">{isLoadingSave ? '⏳ Выгружаем...' : `📤 Выгрузить${selectedSaveSlot ? ` из слота ${selectedSaveSlot}` : ''}`}</button>
             </div>
-            {selectedSaveSlot && (
-              <p className="text-xs text-amber-400 mt-2 text-center">Выбран слот {selectedSaveSlot}</p>
-            )}
+            {selectedSaveSlot && <p className="text-xs text-amber-400 mt-2 text-center">Выбран слот {selectedSaveSlot}</p>}
           </div>
         </div>
       )}
@@ -1009,10 +789,9 @@ export default function Dashboard() {
         <div className="w-64 bg-gray-800 border-r border-gray-700 p-4 flex flex-col flex-shrink-0">
           <h2 className="text-xl font-bold text-blue-500 mb-4">🎲 Меню Игрока</h2>
           <button onClick={() => setCurrentView('map')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'map' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🗺️ Карта</button>
-          <button onClick={() => setCurrentView('characters')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'characters' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>👤 Мой персонаж</button>
+          <button onClick={() => setCurrentView('characters')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'characters' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>👤 Персонажи</button>
           <button onClick={() => setCurrentView('items')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'items' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🎒 Предметы</button>
           <button onClick={() => setCurrentView('proposals')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'proposals' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>💡 Предложение</button>
-          {/* ✅ Игрок может видеть краткий лор */}
           <button onClick={() => { setCurrentView('lore-short'); fetchLoreNotes('short'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-short' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📜 Краткий лор</button>
         </div>
       )}
@@ -1060,7 +839,6 @@ export default function Dashboard() {
                       <button onClick={() => setCurrentTool('eraser')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'eraser' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🧹</button>
                       <button onClick={() => setCurrentTool('fog-add')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-add' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🌫️+</button>
                       <button onClick={() => setCurrentTool('fog-remove')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-remove' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🌫️-</button>
-                      
                       {currentTool !== 'pan' && currentTool !== 'fog-add' && currentTool !== 'fog-remove' && (
                         <>
                           <input type="color" value={brushColor} onChange={e => setBrushColor(e.target.value)} className="w-8 h-8 rounded cursor-pointer" />
@@ -1076,14 +854,9 @@ export default function Dashboard() {
                       )}
                     </>
                   )}
-                  
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-gray-400">Сетка: {gridSize}px</span>
-                    <input type="range" min="20" max="80" value={gridSize} onChange={(e) => {
-                      const newSize = Number(e.target.value);
-                      setGridSize(newSize);
-                      updateRoomSettings({ grid_size: newSize });
-                    }} className="w-24" />
+                    <input type="range" min="20" max="80" value={gridSize} onChange={(e) => { const newSize = Number(e.target.value); setGridSize(newSize); updateRoomSettings({ grid_size: newSize }); }} className="w-24" />
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-gray-400">Зум: {Math.round(zoom * 100)}%</span>
@@ -1094,43 +867,15 @@ export default function Dashboard() {
                 </div>
               </div>
               
-              <div ref={mapContainerRef} className="flex-1 bg-gray-800 rounded-lg border-2 border-gray-600 relative overflow-hidden select-none"
-                style={{ cursor: currentTool === 'pan' ? (isPanning ? 'grabbing' : 'grab') : (role === 'player' ? 'grab' : 'crosshair'), WebkitUserSelect: 'none', userSelect: 'none' }}
-                onDragStart={(e) => e.preventDefault()}
-                onMouseDown={handleMapMouseDown} onMouseMove={handleMapMouseMove} onMouseUp={handleMapMouseUp}
-                onMouseLeave={() => { handleMapMouseUp(); setMousePos(null); }} onWheel={handleWheel}>
-                
+              <div ref={mapContainerRef} className="flex-1 bg-gray-800 rounded-lg border-2 border-gray-600 relative overflow-hidden select-none" style={{ cursor: currentTool === 'pan' ? (isPanning ? 'grabbing' : 'grab') : (role === 'player' ? 'grab' : 'crosshair'), WebkitUserSelect: 'none', userSelect: 'none' }} onDragStart={(e) => e.preventDefault()} onMouseDown={handleMapMouseDown} onMouseMove={handleMapMouseMove} onMouseUp={handleMapMouseUp} onMouseLeave={() => { handleMapMouseUp(); setMousePos(null); }} onWheel={handleWheel}>
                 <div className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', zIndex: 0 }}>
-                  {mapImage ? <img src={mapImage} alt="Карта" className="max-w-none select-none pointer-events-none" draggable={false} style={{ minWidth: '2000px', minHeight: '2000px' }} /> :
-                    <div className="bg-gray-700 flex items-center justify-center" style={{ width: '2000px', height: '2000px' }}><p className="text-gray-400">Загрузите карту</p></div>}
+                  {mapImage ? <img src={mapImage} alt="Карта" className="max-w-none select-none pointer-events-none" draggable={false} style={{ minWidth: '2000px', minHeight: '2000px' }} /> : <div className="bg-gray-700 flex items-center justify-center" style={{ width: '2000px', height: '2000px' }}><p className="text-gray-400">Загрузите карту</p></div>}
                 </div>
-
-                <div className="absolute pointer-events-none" style={{
-                  transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`,
-                  transformOrigin: '0 0',
-                  zIndex: 101,
-                  width: '10000px',
-                  height: '10000px',
-                  backgroundImage: `linear-gradient(rgba(0,0,0,0.4) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.4) 1px, transparent 1px)`,
-                  backgroundSize: `${gridSize}px ${gridSize}px`
-                }} />
-
+                <div className="absolute pointer-events-none" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', zIndex: 101, width: '10000px', height: '10000px', backgroundImage: `linear-gradient(rgba(0,0,0,0.4) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.4) 1px, transparent 1px)`, backgroundSize: `${gridSize}px ${gridSize}px` }} />
                 <div className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', zIndex: 50 }}>
                   {boardTokens.map(token => (
-                    <div key={token.id} 
-                      className={`absolute select-none token-element ${(role === 'dm' || token.author_nickname === user) ? 'cursor-move' : 'cursor-default'}`}
-                      style={{
-                        left: token.position_x, top: token.position_y,
-                        width: (token.grid_size || 1) * gridSize, height: (token.grid_size || 1) * gridSize,
-                        zIndex: token.layer || 10,
-                        border: selectedToken === token.id ? '3px solid #fbbf24' : (token.author_nickname === user ? '2px solid #22c55e' : '2px solid #3b82f6'),
-                        boxShadow: selectedToken === token.id ? '0 0 15px rgba(251, 191, 36, 0.9), 0 0 30px rgba(251, 191, 36, 0.5)' : '0 4px 6px rgba(0,0,0,0.4)',
-                        transition: draggedToken === token.id ? 'none' : 'all 0.15s ease'
-                      }}
-                      onMouseDown={(e) => handleTokenMouseDown(e, token)} 
-                      onClick={(e) => { e.stopPropagation(); setSelectedToken(token.id); }}>
-                      {token.image_url ? <img src={token.image_url} alt={token.name} className="w-full h-full object-cover rounded select-none pointer-events-none" draggable={false} /> :
-                        <div className="w-full h-full bg-blue-600 text-white flex items-center justify-center rounded text-xs font-bold p-1 text-center">{token.name}</div>}
+                    <div key={token.id} className={`absolute select-none token-element ${(role === 'dm' || token.author_nickname === user) ? 'cursor-move' : 'cursor-default'}`} style={{ left: token.position_x, top: token.position_y, width: (token.grid_size || 1) * gridSize, height: (token.grid_size || 1) * gridSize, zIndex: token.layer || 10, border: selectedToken === token.id ? '3px solid #fbbf24' : (token.author_nickname === user ? '2px solid #22c55e' : '2px solid #3b82f6'), boxShadow: selectedToken === token.id ? '0 0 15px rgba(251, 191, 36, 0.9), 0 0 30px rgba(251, 191, 36, 0.5)' : '0 4px 6px rgba(0,0,0,0.4)', transition: draggedToken === token.id ? 'none' : 'all 0.15s ease' }} onMouseDown={(e) => handleTokenMouseDown(e, token)} onClick={(e) => { e.stopPropagation(); setSelectedToken(token.id); }}>
+                      {token.image_url ? <img src={token.image_url} alt={token.name} className="w-full h-full object-cover rounded select-none pointer-events-none" draggable={false} /> : <div className="w-full h-full bg-blue-600 text-white flex items-center justify-center rounded text-xs font-bold p-1 text-center">{token.name}</div>}
                       {selectedToken === token.id && role === 'dm' && (
                         <div className="layer-controls absolute -top-10 left-1/2 -translate-x-1/2 flex gap-1 bg-gray-900 rounded px-2 py-1 shadow-lg whitespace-nowrap border border-gray-600">
                           <button onClick={(e) => { e.stopPropagation(); raiseTokenLayer(token); }} className="text-xs px-2 py-1 bg-green-600 hover:bg-green-700 rounded">⬆️</button>
@@ -1141,18 +886,11 @@ export default function Dashboard() {
                     </div>
                   ))}
                 </div>
-
-                {role === 'dm' && (
-                  <canvas ref={canvasRef} className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', left: 0, top: 0, zIndex: 100, pointerEvents: (currentTool === 'brush' || currentTool === 'eraser') ? 'auto' : 'none' }} onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing} />
-                )}
-
+                {role === 'dm' && <canvas ref={canvasRef} className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', left: 0, top: 0, zIndex: 100, pointerEvents: (currentTool === 'brush' || currentTool === 'eraser') ? 'auto' : 'none' }} onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing} />}
                 <canvas ref={fogCanvasRef} width={FOG_CANVAS_SIZE} height={FOG_CANVAS_SIZE} className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', left: 0, top: 0, zIndex: 102, pointerEvents: 'none' }} />
-                
                 {role !== 'dm' && remoteFogPreview && remoteFogPreview.points.length > 1 && (
                   <svg className="absolute" style={{ left: 0, top: 0, width: '100%', height: '100%', zIndex: 103, pointerEvents: 'none' }} aria-hidden="true">
-                    <polyline
-                      points={remoteFogPreview.points.map(p => `${p.x * zoom + mapOffset.x},${p.y * zoom + mapOffset.y}`).join(' ')}
-                      fill="none" stroke={remoteFogPreview.type === 'add' ? '#000' : '#fff'} strokeWidth={2} strokeDasharray="5,5" />
+                    <polyline points={remoteFogPreview.points.map(p => `${p.x * zoom + mapOffset.x},${p.y * zoom + mapOffset.y}`).join(' ')} fill="none" stroke={remoteFogPreview.type === 'add' ? '#000' : '#fff'} strokeWidth={2} strokeDasharray="5,5" />
                   </svg>
                 )}
                 {role === 'dm' && (currentTool === 'fog-add' || currentTool === 'fog-remove') && currentFogPoints.length > 0 && (
@@ -1164,9 +902,7 @@ export default function Dashboard() {
                   </svg>
                 )}
               </div>
-              <div className="mt-2 text-sm text-gray-400 flex-shrink-0">
-                💡 Колесо — зум | ✋ — двигать карту | Клик по своей фигурке — переместить
-              </div>
+              <div className="mt-2 text-sm text-gray-400 flex-shrink-0">💡 Колесо — зум | ✋ — двигать карту | Клик по своей фигурке — переместить</div>
             </div>
           )}
 
@@ -1178,11 +914,7 @@ export default function Dashboard() {
                 {isMapUploading && <p className="text-sm text-yellow-400 mb-4" role="status">Сжимаем и загружаем карту...</p>}
                 {mapImage && <img src={mapImage} alt="Предпросмотр" className="max-w-full h-64 object-contain border border-gray-600 rounded mb-4" />}
                 <label className="block text-sm font-bold mb-2">Размер сетки: {gridSize}px</label>
-                <input type="range" min="20" max="100" value={gridSize} onChange={(e) => {
-                   const newSize = Number(e.target.value);
-                   setGridSize(newSize);
-                   updateRoomSettings({ grid_size: newSize });
-                }} className="w-full mb-4" />
+                <input type="range" min="20" max="100" value={gridSize} onChange={(e) => { const newSize = Number(e.target.value); setGridSize(newSize); updateRoomSettings({ grid_size: newSize }); }} className="w-full mb-4" />
                 <button onClick={() => setCurrentView('map')} className="bg-green-600 hover:bg-green-700 px-6 py-2 rounded font-bold">Применить</button>
               </div>
             </div>
@@ -1191,15 +923,26 @@ export default function Dashboard() {
           {currentView === 'characters' && (
             <div>
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl font-bold text-amber-500">{role === 'player' ? '👤 Мой персонаж' : '👥 Персонажи'}</h2>
-                {/* ✅ Исправлено: кнопка только у Мастера, текст исправлен */}
-                {role === 'dm' && (
-                  <button onClick={() => setShowCharForm(true)} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">+ Создать</button>
-                )}
+                <h2 className="text-2xl font-bold text-amber-500">{role === 'player' ? '👤 Персонажи' : '👥 Персонажи'}</h2>
+                {/* ✅ Кнопка доступна и Мастеру, и Игроку */}
+                <button
+                  onClick={() => {
+                    setSelectedCharacter(null);
+                    setNewChar({ name: '', race: '', strength: 10, dexterity: 10, constitution: 10, intelligence: 10, wisdom: 10, charisma: 10, hit_points: 10, armor_class: 10, spells: '', description: '', image_url: '' });
+                    setShowCharForm(true);
+                  }}
+                  className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold"
+                >
+                  + Создать
+                </button>
               </div>
-              {showCharForm && role === 'dm' && (
+              
+              {/* ✅ Форма отображается для всех, кто её открыл */}
+              {showCharForm && (
                 <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 mb-6">
-                  <h3 className="text-xl font-bold mb-4">Создать персонажа</h3>
+                  <h3 className="text-xl font-bold mb-4">
+                    {selectedCharacter ? 'Редактировать персонажа' : 'Создать персонажа'}
+                  </h3>
                   <div className="grid grid-cols-2 gap-4 mb-4">
                     <input className="bg-gray-700 p-2 rounded" placeholder="Имя" value={newChar.name} onChange={e => setNewChar({ ...newChar, name: e.target.value })} />
                     <input className="bg-gray-700 p-2 rounded" placeholder="Раса" value={newChar.race} onChange={e => setNewChar({ ...newChar, race: e.target.value })} />
@@ -1224,19 +967,35 @@ export default function Dashboard() {
                   <textarea className="bg-gray-700 p-2 rounded w-full mb-4" placeholder="Заклинания" value={newChar.spells} onChange={e => setNewChar({ ...newChar, spells: e.target.value })} rows={2} />
                   <textarea className="bg-gray-700 p-2 rounded w-full mb-4" placeholder="Описание" value={newChar.description} onChange={e => setNewChar({ ...newChar, description: e.target.value })} rows={3} />
                   <div className="flex gap-2">
-                    <button onClick={addCharacter} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">Сохранить</button>
-                    <button onClick={() => setShowCharForm(false)} className="bg-gray-600 hover:bg-gray-700 px-4 py-2 rounded font-bold">Отмена</button>
+                    {/* ✅ Динамическая кнопка сохранения */}
+                    <button
+                      onClick={selectedCharacter ? updateCharacter : addCharacter}
+                      className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold"
+                    >
+                      {selectedCharacter ? 'Сохранить изменения' : 'Создать персонажа'}
+                    </button>
+                    <button onClick={() => { setShowCharForm(false); setSelectedCharacter(null); }} className="bg-gray-600 hover:bg-gray-700 px-4 py-2 rounded font-bold">Отмена</button>
                   </div>
                 </div>
               )}
+              
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {characters.filter(c => role === 'dm' || c.author_nickname === user).map(char => (
+                {/* ✅ Теперь отображаются ВСЕ персонажи, а не только свои */}
+                {characters.map(char => (
                   <div key={char.id} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
                     {char.image_url && <img src={char.image_url} alt={char.name} className="w-full h-40 object-cover rounded mb-3" />}
                     <div className="flex justify-between items-start mb-2">
-                      <div><h3 className="text-xl font-bold">{char.name}</h3><p className="text-sm text-gray-400">{char.race}</p></div>
+                      <div>
+                        <h3 className="text-xl font-bold">{char.name}</h3>
+                        <p className="text-sm text-gray-400">{char.race}</p>
+                        {role === 'dm' && <p className="text-xs text-gray-500 mt-1">Автор: {char.author_nickname}</p>}
+                      </div>
+                      {/* ✅ Добавлена кнопка редактирования с проверкой прав */}
                       {(role === 'dm' || char.author_nickname === user) && (
-                        <button onClick={() => addCharToBoard(char)} className="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-sm font-bold">+ На доску</button>
+                        <div className="flex gap-2">
+                          <button onClick={() => editCharacter(char)} className="bg-amber-600 hover:bg-amber-700 px-3 py-1 rounded text-sm font-bold">✏️ Редактировать</button>
+                          <button onClick={() => addCharToBoard(char)} className="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-sm font-bold">+ На доску</button>
+                        </div>
                       )}
                     </div>
                     <div className="grid grid-cols-3 gap-2 text-sm mb-2">
@@ -1353,64 +1112,30 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* ✅ НОВЫЙ БЛОК ОТОБРАЖЕНИЯ ЛОРА (без папок) */}
           {(currentView === 'lore-full' || currentView === 'lore-short') && (
             <div className="max-w-4xl mx-auto">
               <div className="flex justify-between items-center mb-6">
                 <div>
-                  <h2 className="text-2xl font-bold text-amber-500">
-                    {currentView === 'lore-full' ? '📖 Лор' : '📜 Краткий лор'}
-                  </h2>
-                  <p className="text-sm text-gray-400 mt-1">
-                    {currentView === 'lore-full'
-                      ? 'Полная информация о мире кампании'
-                      : 'Информация, доступная игрокам'}
-                  </p>
+                  <h2 className="text-2xl font-bold text-amber-500">{currentView === 'lore-full' ? '📖 Лор' : '📜 Краткий лор'}</h2>
+                  <p className="text-sm text-gray-400 mt-1">{currentView === 'lore-full' ? 'Полная информация о мире кампании' : 'Информация, доступная игрокам'}</p>
                 </div>
                 {role === 'dm' && (
-                  <button
-                    onClick={() => {
-                      setNewNote({ title: '', content: '' });
-                      setShowNoteForm(true);
-                    }}
-                    className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold"
-                  >
-                    + Создать заметку
-                  </button>
+                  <button onClick={() => { setNewNote({ title: '', content: '' }); setShowNoteForm(true); }} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">+ Создать заметку</button>
                 )}
               </div>
-
               {role === 'dm' && showNoteForm && (
                 <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 mb-6">
-                  <h3 className="text-xl font-bold mb-4">
-                    {currentView === 'lore-full' ? 'Новая заметка в полном лоре' : 'Новая заметка в кратком лоре'}
-                  </h3>
-                  <input
-                    className="bg-gray-700 p-3 rounded w-full mb-4"
-                    placeholder="Название заметки"
-                    value={newNote.title}
-                    onChange={e => setNewNote({ ...newNote, title: e.target.value })}
-                  />
-                  <textarea
-                    className="bg-gray-700 p-3 rounded w-full mb-4"
-                    placeholder="Текст заметки..."
-                    value={newNote.content}
-                    onChange={e => setNewNote({ ...newNote, content: e.target.value })}
-                    rows={10}
-                  />
+                  <h3 className="text-xl font-bold mb-4">{currentView === 'lore-full' ? 'Новая заметка в полном лоре' : 'Новая заметка в кратком лоре'}</h3>
+                  <input className="bg-gray-700 p-3 rounded w-full mb-4" placeholder="Название заметки" value={newNote.title} onChange={e => setNewNote({ ...newNote, title: e.target.value })} />
+                  <textarea className="bg-gray-700 p-3 rounded w-full mb-4" placeholder="Текст заметки..." value={newNote.content} onChange={e => setNewNote({ ...newNote, content: e.target.value })} rows={10} />
                   <div className="flex gap-2">
                     <button onClick={addLoreNote} className="bg-green-600 hover:bg-green-700 px-5 py-2 rounded font-bold">Сохранить</button>
                     <button onClick={() => setShowNoteForm(false)} className="bg-gray-600 hover:bg-gray-700 px-5 py-2 rounded font-bold">Отмена</button>
                   </div>
                 </div>
               )}
-
               <div className="space-y-4">
-                {loreNotes.length === 0 && (
-                  <div className="bg-gray-800 border border-gray-700 rounded-lg p-8 text-center">
-                    <p className="text-gray-500">Здесь пока нет заметок.</p>
-                  </div>
-                )}
+                {loreNotes.length === 0 && <div className="bg-gray-800 border border-gray-700 rounded-lg p-8 text-center"><p className="text-gray-500">Здесь пока нет заметок.</p></div>}
                 {loreNotes.map(note => (
                   <article key={note.id} className="bg-gray-800 p-5 rounded-lg border border-gray-700">
                     <h3 className="text-xl font-bold text-amber-400 mb-3">{note.title}</h3>
@@ -1486,15 +1211,7 @@ export default function Dashboard() {
               <h4 className="text-sm font-bold text-gray-400 mb-2 flex justify-between">
                 <span>История</span>
                 {diceHistory.length > 0 && (
-                  <button 
-                    onClick={async () => { 
-                      await supabase.from('dice_rolls').delete().eq('room_id', roomId); 
-                      setDiceHistory([]);
-                    }} 
-                    className="text-xs text-red-400 hover:text-red-300"
-                  >
-                    Очистить
-                  </button>
+                  <button onClick={async () => { await supabase.from('dice_rolls').delete().eq('room_id', roomId); setDiceHistory([]); }} className="text-xs text-red-400 hover:text-red-300">Очистить</button>
                 )}
               </h4>
               <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
