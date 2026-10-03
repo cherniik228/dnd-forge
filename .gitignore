@@ -1,0 +1,7 @@
+   node_modules
+   .next
+   .env.local
+   *.log
+   pnpm-lock.yamlnode_modules 
+.next 
+node_modules
