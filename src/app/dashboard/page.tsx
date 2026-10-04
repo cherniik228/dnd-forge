@@ -60,7 +60,7 @@ export default function Dashboard() {
   const [currentView, setCurrentView] = useState<View>('main');
   
   const [mapImage, setMapImage] = useState<string>('');
-  const [gridSize, setGridSize] = useState(40);
+  const [gridSize, setGridSize] = useState(100); // ✅ Изменено начальное значение на 100
 
   const [entities, setEntities] = useState<any[]>([]);
   const [participants, setParticipants] = useState<Participant[]>([]);
@@ -69,12 +69,15 @@ export default function Dashboard() {
   
   const [characters, setCharacters] = useState<any[]>([]);
   const [showCharForm, setShowCharForm] = useState(false);
-  const [selectedCharacter, setSelectedCharacter] = useState<string | null>(null); // ✅ НОВОЕ
+  const [selectedCharacter, setSelectedCharacter] = useState<string | null>(null);
   const [newChar, setNewChar] = useState({ name: '', race: '', strength: 10, dexterity: 10, constitution: 10, intelligence: 10, wisdom: 10, charisma: 10, hit_points: 10, armor_class: 10, spells: '', description: '', image_url: '' });
 
   const [items, setItems] = useState<any[]>([]);
   const [showItemForm, setShowItemForm] = useState(false);
-  const [newItem, setNewItem] = useState({ name: '', description: '' });
+  const [newItem, setNewItem] = useState({ name: '', description: '', owner_nickname: '' }); // ✅ Добавлен owner_nickname
+  
+  const [showInventoryViewer, setShowInventoryViewer] = useState(false); // ✅ Новое состояние
+  const [selectedInventoryPlayer, setSelectedInventoryPlayer] = useState<string | null>(null); // ✅ Новое состояние
 
   const [objects, setObjects] = useState<any[]>([]);
   const [showObjForm, setShowObjForm] = useState(false);
@@ -180,7 +183,7 @@ export default function Dashboard() {
   const reloadRoomLight = useCallback(async (id: string) => {
     const { data } = await supabase.from('rooms').select('grid_size, fog_data').eq('id', id).single();
     if (!data) return;
-    setGridSize(data.grid_size || 40);
+    setGridSize(data.grid_size || 100);
     applyFog(data.fog_data);
   }, []);
 
@@ -192,7 +195,7 @@ export default function Dashboard() {
       const { data } = await supabase.from('rooms').select('map_image, grid_size, fog_data').eq('id', id).single();
       if (!data) return;
       setMapImage(data.map_image || '');
-      setGridSize(data.grid_size || 40);
+      setGridSize(data.grid_size || 100);
       applyFog(data.fog_data);
     } finally {
       roomReloadInFlight.current = false;
@@ -242,7 +245,7 @@ export default function Dashboard() {
     await supabase.from('room_participants').upsert({ room_id: room.id, user_nickname: savedUser, role: userRole }, { onConflict: 'room_id,user_nickname' });
 
     setMapImage(room.map_image || '');
-    setGridSize(room.grid_size || 40);
+    setGridSize(room.grid_size || 100);
     if (room.fog_data && Array.isArray(room.fog_data)) setFogPolygons(room.fog_data);
     else setFogPolygons([]);
     
@@ -279,10 +282,19 @@ export default function Dashboard() {
     listTables.forEach(table => {
       const setter = tableSetters[table] as any;
       channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `room_id=eq.${roomId}` }, (payload: any) => {
-        if (payload.eventType === 'DELETE') setter((prev: any[]) => prev.filter(x => x.id !== payload.old?.id));
-        else if (payload.new?.id !== undefined) {
-          if (payload.errors?.length) reloadTable(table, roomId);
-          else setter((prev: any[]) => upsertById(prev, payload.new));
+        if (payload.eventType === 'DELETE') {
+          setter((prev: any[]) => prev.filter(x => x.id !== payload.old?.id));
+        } else if (payload.new?.id !== undefined) {
+          if (payload.errors?.length) {
+            reloadTable(table, roomId);
+          } else {
+            const row = payload.new;
+            // ✅ Фильтрация Realtime для персонажей: игрок получает только своих
+            if (table === 'characters' && role === 'player') {
+              if (row.author_nickname !== user) return;
+            }
+            setter((prev: any[]) => upsertById(prev, row));
+          }
         }
       });
     });
@@ -331,7 +343,7 @@ export default function Dashboard() {
 
     channelRef.current = channel;
     return () => { isChannelReadyRef.current = false; channelRef.current = null; supabase.removeChannel(channel); };
-  }, [roomId, reloadRoomState, reloadRoomLight, reloadTable]);
+  }, [roomId, reloadRoomState, reloadRoomLight, reloadTable, role, user]);
 
   const saveFogToDatabase = useCallback(async (newFogPolygons: FogPolygon[]) => {
     if (role !== 'dm' || !roomId) return;
@@ -384,17 +396,12 @@ export default function Dashboard() {
     setNewChar({ name: '', race: '', strength: 10, dexterity: 10, constitution: 10, intelligence: 10, wisdom: 10, charisma: 10, hit_points: 10, armor_class: 10, spells: '', description: '', image_url: '' });
   };
 
-  // ✅ НОВАЯ ФУНКЦИЯ: Редактирование персонажа
   const updateCharacter = async () => {
     if (!newChar.name.trim()) return alert("Введите имя!");
     if (!selectedCharacter) return;
-
     const character = characters.find(c => c.id === selectedCharacter);
     if (!character) return alert("Персонаж не найден.");
-
-    if (role === 'player' && character.author_nickname !== user) {
-      return alert("Вы можете редактировать только своего персонажа.");
-    }
+    if (role === 'player' && character.author_nickname !== user) return alert("Вы можете редактировать только своего персонажа.");
 
     const updates = {
       name: newChar.name.trim(), race: newChar.race, strength: newChar.strength,
@@ -405,33 +412,18 @@ export default function Dashboard() {
       description: newChar.description, image_url: newChar.image_url || '',
     };
 
-    const { data, error } = await supabase
-      .from('characters')
-      .update(updates)
-      .eq('id', selectedCharacter)
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Ошибка редактирования персонажа:', error);
-      alert('Не удалось сохранить изменения: ' + error.message);
-      return;
-    }
+    const { data, error } = await supabase.from('characters').update(updates).eq('id', selectedCharacter).select().single();
+    if (error) { console.error('Ошибка редактирования персонажа:', error); alert('Не удалось сохранить изменения: ' + error.message); return; }
 
     setCharacters(prev => prev.map(c => c.id === selectedCharacter ? { ...c, ...data } : c));
     broadcast('table_changed', { table: 'characters' });
-
     setShowCharForm(false);
     setSelectedCharacter(null);
     setNewChar({ name: '', race: '', strength: 10, dexterity: 10, constitution: 10, intelligence: 10, wisdom: 10, charisma: 10, hit_points: 10, armor_class: 10, spells: '', description: '', image_url: '' });
   };
 
-  // ✅ НОВАЯ ФУНКЦИЯ: Открытие редактора
   const editCharacter = (char: any) => {
-    if (role === 'player' && char.author_nickname !== user) {
-      return alert("Вы можете редактировать только своего персонажа.");
-    }
-
+    if (role === 'player' && char.author_nickname !== user) return alert("Вы можете редактировать только своего персонажа.");
     setSelectedCharacter(char.id);
     setNewChar({
       name: char.name || '', race: char.race || '', strength: char.strength ?? 10,
@@ -450,11 +442,52 @@ export default function Dashboard() {
     setCurrentView('map');
   };
 
+  // ✅ Обновленное создание предмета с owner_nickname
   const addItem = async () => {
-    if (!newItem.name) return alert("Введите название!");
-    const newData = { room_id: roomId, ...newItem, author_nickname: user };
+    if (!newItem.name.trim()) return alert("Введите название!");
+    const newData = {
+      room_id: roomId,
+      name: newItem.name.trim(),
+      description: newItem.description,
+      owner_nickname: newItem.owner_nickname || null,
+      author_nickname: user,
+    };
     if (!(await insertAndSync('items', newData))) return;
-    setShowItemForm(false); setNewItem({ name: '', description: '' });
+    setShowItemForm(false);
+    setNewItem({ name: '', description: '', owner_nickname: '' });
+  };
+
+  // ✅ Выдача предмета игроку
+  const giveItemToPlayer = async (item: any, playerNickname: string) => {
+    if (role !== 'dm') return;
+    const { data, error } = await supabase
+      .from('items')
+      .update({ owner_nickname: playerNickname || null })
+      .eq('id', item.id)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Ошибка выдачи предмета:', error);
+      alert('Не удалось выдать предмет: ' + error.message);
+      return;
+    }
+    setItems(prev => prev.map(i => i.id === item.id ? { ...i, ...data } : i));
+    broadcast('table_changed', { table: 'items' });
+  };
+
+  // ✅ Удаление предмета
+  const deleteItem = async (item: any) => {
+    if (role !== 'dm') return;
+    if (!confirm(`Удалить предмет «${item.name}»?`)) return;
+    const { error } = await supabase.from('items').delete().eq('id', item.id);
+    if (error) {
+      console.error('Ошибка удаления предмета:', error);
+      alert('Не удалось удалить предмет: ' + error.message);
+      return;
+    }
+    setItems(prev => prev.filter(i => i.id !== item.id));
+    broadcast('table_changed', { table: 'items' });
   };
 
   const addObject = async () => {
@@ -526,7 +559,7 @@ export default function Dashboard() {
       if (data.grid_size) setGridSize(data.grid_size);
       const restoredFog = Array.isArray(data.fog_data) ? data.fog_data : [];
       setFogPolygons(restoredFog);
-      await supabase.from('rooms').update({ map_image: data.map_image || '', grid_size: data.grid_size || 40, fog_data: restoredFog }).eq('id', roomId);
+      await supabase.from('rooms').update({ map_image: data.map_image || '', grid_size: data.grid_size || 100, fog_data: restoredFog }).eq('id', roomId);
       if (Array.isArray(data.board_tokens)) {
         await supabase.from('board_tokens').delete().eq('room_id', roomId);
         if (data.board_tokens.length > 0) {
@@ -746,6 +779,11 @@ export default function Dashboard() {
 
   const fogPreview = currentFogPoints.map(p => ({ x: p.x * zoom + mapOffset.x, y: p.y * zoom + mapOffset.y }));
 
+  // ✅ ФИЛЬТРЫ ДЛЯ ПЕРСОНАЖЕЙ И ПРЕДМЕТОВ
+  const visibleCharacters = role === 'dm' ? characters : characters.filter(char => char.author_nickname === user);
+  const visibleItems = role === 'dm' ? items : items.filter(item => item.owner_nickname === user);
+  const inventoryItems = selectedInventoryPlayer ? items.filter(item => item.owner_nickname === selectedInventoryPlayer) : [];
+
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 flex">
       {role === 'dm' && (
@@ -856,7 +894,8 @@ export default function Dashboard() {
                   )}
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-gray-400">Сетка: {gridSize}px</span>
-                    <input type="range" min="20" max="80" value={gridSize} onChange={(e) => { const newSize = Number(e.target.value); setGridSize(newSize); updateRoomSettings({ grid_size: newSize }); }} className="w-24" />
+                    {/* ✅ Изменен диапазон сетки на 100-300 */}
+                    <input type="range" min="100" max="300" value={gridSize} onChange={(e) => { const newSize = Number(e.target.value); setGridSize(newSize); updateRoomSettings({ grid_size: newSize }); }} className="w-24" />
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-gray-400">Зум: {Math.round(zoom * 100)}%</span>
@@ -914,7 +953,7 @@ export default function Dashboard() {
                 {isMapUploading && <p className="text-sm text-yellow-400 mb-4" role="status">Сжимаем и загружаем карту...</p>}
                 {mapImage && <img src={mapImage} alt="Предпросмотр" className="max-w-full h-64 object-contain border border-gray-600 rounded mb-4" />}
                 <label className="block text-sm font-bold mb-2">Размер сетки: {gridSize}px</label>
-                <input type="range" min="20" max="100" value={gridSize} onChange={(e) => { const newSize = Number(e.target.value); setGridSize(newSize); updateRoomSettings({ grid_size: newSize }); }} className="w-full mb-4" />
+                <input type="range" min="100" max="300" value={gridSize} onChange={(e) => { const newSize = Number(e.target.value); setGridSize(newSize); updateRoomSettings({ grid_size: newSize }); }} className="w-full mb-4" />
                 <button onClick={() => setCurrentView('map')} className="bg-green-600 hover:bg-green-700 px-6 py-2 rounded font-bold">Применить</button>
               </div>
             </div>
@@ -924,7 +963,6 @@ export default function Dashboard() {
             <div>
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-2xl font-bold text-amber-500">{role === 'player' ? '👤 Персонажи' : '👥 Персонажи'}</h2>
-                {/* ✅ Кнопка доступна и Мастеру, и Игроку */}
                 <button
                   onClick={() => {
                     setSelectedCharacter(null);
@@ -937,7 +975,6 @@ export default function Dashboard() {
                 </button>
               </div>
               
-              {/* ✅ Форма отображается для всех, кто её открыл */}
               {showCharForm && (
                 <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 mb-6">
                   <h3 className="text-xl font-bold mb-4">
@@ -967,11 +1004,7 @@ export default function Dashboard() {
                   <textarea className="bg-gray-700 p-2 rounded w-full mb-4" placeholder="Заклинания" value={newChar.spells} onChange={e => setNewChar({ ...newChar, spells: e.target.value })} rows={2} />
                   <textarea className="bg-gray-700 p-2 rounded w-full mb-4" placeholder="Описание" value={newChar.description} onChange={e => setNewChar({ ...newChar, description: e.target.value })} rows={3} />
                   <div className="flex gap-2">
-                    {/* ✅ Динамическая кнопка сохранения */}
-                    <button
-                      onClick={selectedCharacter ? updateCharacter : addCharacter}
-                      className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold"
-                    >
+                    <button onClick={selectedCharacter ? updateCharacter : addCharacter} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">
                       {selectedCharacter ? 'Сохранить изменения' : 'Создать персонажа'}
                     </button>
                     <button onClick={() => { setShowCharForm(false); setSelectedCharacter(null); }} className="bg-gray-600 hover:bg-gray-700 px-4 py-2 rounded font-bold">Отмена</button>
@@ -980,8 +1013,8 @@ export default function Dashboard() {
               )}
               
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* ✅ Теперь отображаются ВСЕ персонажи, а не только свои */}
-                {characters.map(char => (
+                {/* ✅ Используем visibleCharacters вместо characters */}
+                {visibleCharacters.map(char => (
                   <div key={char.id} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
                     {char.image_url && <img src={char.image_url} alt={char.name} className="w-full h-40 object-cover rounded mb-3" />}
                     <div className="flex justify-between items-start mb-2">
@@ -990,7 +1023,6 @@ export default function Dashboard() {
                         <p className="text-sm text-gray-400">{char.race}</p>
                         {role === 'dm' && <p className="text-xs text-gray-500 mt-1">Автор: {char.author_nickname}</p>}
                       </div>
-                      {/* ✅ Добавлена кнопка редактирования с проверкой прав */}
                       {(role === 'dm' || char.author_nickname === user) && (
                         <div className="flex gap-2">
                           <button onClick={() => editCharacter(char)} className="bg-amber-600 hover:bg-amber-700 px-3 py-1 rounded text-sm font-bold">✏️ Редактировать</button>
@@ -1012,34 +1044,117 @@ export default function Dashboard() {
                     </div>
                   </div>
                 ))}
+                {visibleCharacters.length === 0 && role === 'player' && (
+                  <div className="col-span-2 text-center text-gray-500 py-8">У вас пока нет созданных персонажей.</div>
+                )}
               </div>
             </div>
           )}
 
+          {/* ✅ ПОЛНОСТЬЮ ОБНОВЛЕННЫЙ БЛОК ПРЕДМЕТОВ */}
           {currentView === 'items' && (
             <div>
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl font-bold text-amber-500">⚔️ Предметы</h2>
-                {role === 'dm' && <button onClick={() => setShowItemForm(true)} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">+ Создать</button>}
+                <div>
+                  <h2 className="text-2xl font-bold text-amber-500">⚔️ Предметы</h2>
+                  {role === 'player' && <p className="text-sm text-gray-400 mt-1">Предметы, выданные вашему персонажу</p>}
+                  {role === 'dm' && <p className="text-sm text-gray-400 mt-1">Управление предметами игроков</p>}
+                </div>
+                {role === 'dm' && (
+                  <div className="flex gap-2">
+                    <button onClick={() => { setSelectedInventoryPlayer(null); setShowInventoryViewer(true); }} className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded font-bold">👁 Просмотр</button>
+                    <button onClick={() => { setNewItem({ name: '', description: '', owner_nickname: '' }); setShowItemForm(true); }} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">+ Создать</button>
+                  </div>
+                )}
               </div>
+
               {showItemForm && role === 'dm' && (
                 <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 mb-6">
                   <h3 className="text-xl font-bold mb-4">Создать предмет</h3>
                   <input className="bg-gray-700 p-2 rounded w-full mb-4" placeholder="Название" value={newItem.name} onChange={e => setNewItem({ ...newItem, name: e.target.value })} />
                   <textarea className="bg-gray-700 p-2 rounded w-full mb-4" placeholder="Описание" value={newItem.description} onChange={e => setNewItem({ ...newItem, description: e.target.value })} rows={4} />
+                  <div className="mb-4">
+                    <label className="block text-sm text-gray-400 mb-2">Выдать игроку (необязательно):</label>
+                    <select className="bg-gray-700 p-2 rounded w-full" value={newItem.owner_nickname} onChange={e => setNewItem({ ...newItem, owner_nickname: e.target.value })}>
+                      <option value="">Без владельца (только у Мастера)</option>
+                      {participants.filter(p => p.role === 'player').map(p => (
+                        <option key={p.user_nickname} value={p.user_nickname}>{p.user_nickname}</option>
+                      ))}
+                    </select>
+                  </div>
                   <div className="flex gap-2">
                     <button onClick={addItem} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">Сохранить</button>
                     <button onClick={() => setShowItemForm(false)} className="bg-gray-600 hover:bg-gray-700 px-4 py-2 rounded font-bold">Отмена</button>
                   </div>
                 </div>
               )}
+
+              {showInventoryViewer && role === 'dm' && (
+                <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 mb-6">
+                  <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-xl font-bold">👁 Просмотр инвентаря игрока</h3>
+                    <button onClick={() => setShowInventoryViewer(false)} className="text-gray-400 hover:text-white">✕ Закрыть</button>
+                  </div>
+                  <select className="bg-gray-700 p-2 rounded w-full mb-4" value={selectedInventoryPlayer || ''} onChange={e => setSelectedInventoryPlayer(e.target.value || null)}>
+                    <option value="">Выберите игрока...</option>
+                    {participants.filter(p => p.role === 'player').map(p => (
+                      <option key={p.user_nickname} value={p.user_nickname}>{p.user_nickname}</option>
+                    ))}
+                  </select>
+                  
+                  {selectedInventoryPlayer && (
+                    <div className="space-y-3">
+                      {inventoryItems.length === 0 ? (
+                        <p className="text-gray-500 text-center py-4">У этого игрока пока нет предметов.</p>
+                      ) : (
+                        inventoryItems.map(item => (
+                          <div key={item.id} className="bg-gray-700 p-4 rounded-lg border border-gray-600 flex justify-between items-start">
+                            <div>
+                              <h4 className="font-bold text-amber-400">{item.name}</h4>
+                              <p className="text-sm text-gray-300">{item.description}</p>
+                            </div>
+                            <div className="flex gap-2">
+                              <button onClick={() => giveItemToPlayer(item, '')} className="bg-yellow-600 hover:bg-yellow-700 px-3 py-1 rounded text-xs font-bold">Забрать</button>
+                              <button onClick={() => deleteItem(item)} className="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs font-bold">Удалить</button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {items.map(item => (
+                {(role === 'dm' && showInventoryViewer ? inventoryItems : visibleItems).map(item => (
                   <div key={item.id} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-                    <h3 className="text-xl font-bold mb-2">{item.name}</h3>
-                    <p className="text-gray-400">{item.description}</p>
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <h3 className="text-xl font-bold">{item.name}</h3>
+                        {item.owner_nickname && <p className="text-xs text-blue-400 mt-1">Владелец: {item.owner_nickname}</p>}
+                      </div>
+                      {role === 'dm' && !showInventoryViewer && (
+                        <div className="flex gap-2">
+                          <select 
+                            className="bg-gray-700 text-xs p-1 rounded border border-gray-600"
+                            value={item.owner_nickname || ''}
+                            onChange={(e) => giveItemToPlayer(item, e.target.value)}
+                          >
+                            <option value="">Без владельца</option>
+                            {participants.filter(p => p.role === 'player').map(p => (
+                              <option key={p.user_nickname} value={p.user_nickname}>{p.user_nickname}</option>
+                            ))}
+                          </select>
+                          <button onClick={() => deleteItem(item)} className="bg-red-600 hover:bg-red-700 px-2 py-1 rounded text-xs font-bold">🗑️</button>
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-gray-400 text-sm">{item.description}</p>
                   </div>
                 ))}
+                {visibleItems.length === 0 && role === 'player' && (
+                  <div className="col-span-2 text-center text-gray-500 py-8">У вас пока нет предметов. Мастер может выдать их вам.</div>
+                )}
               </div>
             </div>
           )}
