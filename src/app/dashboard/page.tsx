@@ -22,6 +22,7 @@ interface RoomSave {
 }
 
 const FOG_CANVAS_SIZE = 4000;
+const MAP_WORKSPACE_SIZE = 10000; // ✅ Бесконечное рабочее поле
 
 const blobToDataUrl = (blob: Blob) => new Promise<string>((resolve, reject) => {
   const reader = new FileReader();
@@ -127,7 +128,7 @@ export default function Dashboard() {
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const mapOffsetRef = useRef(mapOffset);
   const zoomRef = useRef(zoom);
-  const gridSizeRef = useRef(gridSize);
+  const gridSizeRef = useRef(gridSize); // ✅ Используется для мгновенного доступа в замыканиях
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const hasSubscribedOnce = useRef(false);
   const [isMapUploading, setIsMapUploading] = useState(false);
@@ -180,10 +181,13 @@ export default function Dashboard() {
     setFogPolygons(Array.isArray(fog) ? fog : []);
   };
 
+  // ✅ ИСПРАВЛЕНО: Синхронизация state и ref
   const reloadRoomLight = useCallback(async (id: string) => {
     const { data } = await supabase.from('rooms').select('grid_size, fog_data').eq('id', id).single();
     if (!data) return;
-    setGridSize(data.grid_size || 100);
+    const nextGridSize = Number(data.grid_size) || 100;
+    setGridSize(nextGridSize);
+    gridSizeRef.current = nextGridSize;
     applyFog(data.fog_data);
   }, []);
 
@@ -195,7 +199,9 @@ export default function Dashboard() {
       const { data } = await supabase.from('rooms').select('map_image, grid_size, fog_data').eq('id', id).single();
       if (!data) return;
       setMapImage(data.map_image || '');
-      setGridSize(data.grid_size || 100);
+      const nextGridSize = Number(data.grid_size) || 100;
+      setGridSize(nextGridSize);
+      gridSizeRef.current = nextGridSize;
       applyFog(data.fog_data);
     } finally {
       roomReloadInFlight.current = false;
@@ -245,7 +251,10 @@ export default function Dashboard() {
     await supabase.from('room_participants').upsert({ room_id: room.id, user_nickname: savedUser, role: userRole }, { onConflict: 'room_id,user_nickname' });
 
     setMapImage(room.map_image || '');
-    setGridSize(room.grid_size || 100);
+    const initialGridSize = Number(room.grid_size) || 100;
+    setGridSize(initialGridSize);
+    gridSizeRef.current = initialGridSize;
+    
     if (room.fog_data && Array.isArray(room.fog_data)) setFogPolygons(room.fog_data);
     else setFogPolygons([]);
     
@@ -254,7 +263,7 @@ export default function Dashboard() {
       .select(`*, room_participants (*), entities (*), proposals (*), characters (*), items (*), objects (*), lore_notes (*), board_tokens (*), dice_rolls (*)`)
       .eq('id', room.id).single();
 
-    if (dataError) { console.error(" Ошибка загрузки данных комнаты:", dataError); return; }
+    if (dataError) { console.error("❌ Ошибка загрузки данных комнаты:", dataError); return; }
 
     setParticipants(roomData.room_participants || []);
     setEntities(roomData.entities || []);
@@ -310,16 +319,27 @@ export default function Dashboard() {
         if (payload.errors?.length) { reloadTable('board_tokens', roomId); return; }
         setBoardTokens(prev => upsertById(prev, row));
       })
+      // ✅ ИСПРАВЛЕНО: Надежная синхронизация grid_size независимо от map_image
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` }, (payload: any) => {
         const row = payload.new || {};
-        if (!payload.errors?.length && row.map_image !== undefined) {
+        if (payload.errors?.length) {
+          reloadRoomLight(roomId);
+          return;
+        }
+        if (row.grid_size !== undefined && row.grid_size !== null) {
+          const nextGridSize = Number(row.grid_size);
+          setGridSize(nextGridSize);
+          gridSizeRef.current = nextGridSize;
+        }
+        if (row.map_image !== undefined) {
           setMapImage(row.map_image || '');
-          if (row.grid_size) setGridSize(row.grid_size);
+        }
+        if (row.fog_data !== undefined) {
           applyFog(row.fog_data);
-        } else { reloadRoomLight(roomId); }
+        }
       })
       .on('broadcast', { event: 'map_updated' }, ({ payload }) => {
-        if (payload?.url) { setMapImage(payload.url); if (payload.grid_size) setGridSize(payload.grid_size); }
+        if (payload?.url) { setMapImage(payload.url); if (payload.grid_size) { setGridSize(payload.grid_size); gridSizeRef.current = payload.grid_size; } }
         else { reloadRoomState(roomId); }
       })
       .on('broadcast', { event: 'fog_preview' }, ({ payload }) => { setRemoteFogPreview(Array.isArray(payload?.points) ? payload : null); })
@@ -372,7 +392,6 @@ export default function Dashboard() {
     if (error) return alert("Ошибка броска: " + error.message);
   };
 
-  // ✅ ЗАЩИТА: только Мастер может менять настройки комнаты
   const updateRoomSettings = async (updates: any) => {
     if (role !== 'dm') return;
     const { error } = await supabase.from('rooms').update(updates).eq('id', roomId);
@@ -554,7 +573,7 @@ export default function Dashboard() {
       const data = save.save_data;
       if (!data) return alert('Сохранение повреждено.');
       if (data.map_image !== undefined) setMapImage(data.map_image || '');
-      if (data.grid_size) setGridSize(data.grid_size);
+      if (data.grid_size) { setGridSize(data.grid_size); gridSizeRef.current = data.grid_size; }
       const restoredFog = Array.isArray(data.fog_data) ? data.fog_data : [];
       setFogPolygons(restoredFog);
       await supabase.from('rooms').update({ map_image: data.map_image || '', grid_size: data.grid_size || 100, fog_data: restoredFog }).eq('id', roomId);
@@ -673,7 +692,7 @@ export default function Dashboard() {
     const rect = container.getBoundingClientRect();
     const offset = mapOffsetRef.current;
     const z = zoomRef.current;
-    const grid = gridSizeRef.current;
+    const grid = gridSizeRef.current; // ✅ Использует актуальное значение из ref
     const x = (e.clientX - rect.left - offset.x - dragOffsetRef.current.x) / z;
     const y = (e.clientY - rect.top - offset.y - dragOffsetRef.current.y) / z;
     const snappedX = Math.round(x / grid) * grid;
@@ -785,10 +804,10 @@ export default function Dashboard() {
     <div className="min-h-screen bg-gray-900 text-gray-100 flex">
       {role === 'dm' && (
         <div className="w-64 bg-gray-800 border-r border-gray-700 p-4 flex flex-col flex-shrink-0">
-          <h2 className="text-xl font-bold text-amber-500 mb-4"> Меню Мастера</h2>
+          <h2 className="text-xl font-bold text-amber-500 mb-4">👑 Меню Мастера</h2>
           <button onClick={() => setCurrentView('map')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'map' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🎲 Начать игру</button>
           <button onClick={() => setCurrentView('characters')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'characters' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>👥 Персонажи</button>
-          <button onClick={() => setCurrentView('upload-map')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'upload-map' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>️ Загрузить карту</button>
+          <button onClick={() => setCurrentView('upload-map')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'upload-map' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🗺️ Загрузить карту</button>
           <button onClick={() => { setCurrentView('lore-full'); fetchLoreNotes('full'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-full' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📖 Лор</button>
           <button onClick={() => { setCurrentView('lore-short'); fetchLoreNotes('short'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-short' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📜 Краткий лор</button>
           <button onClick={() => setCurrentView('items')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'items' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>⚔️ Предметы</button>
@@ -813,7 +832,7 @@ export default function Dashboard() {
             </div>
             <div className="space-y-2">
               <button onClick={saveGame} disabled={!selectedSaveSlot || isSaving || isLoadingSave} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm">{isSaving ? '⏳ Сохраняем...' : `💾 Сохранить${selectedSaveSlot ? ` в слот ${selectedSaveSlot}` : ''}`}</button>
-              <button onClick={loadGame} disabled={!selectedSaveSlot || !roomSaves.some(s => s.slot === selectedSaveSlot) || isSaving || isLoadingSave} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm">{isLoadingSave ? '⏳ Выгружаем...' : ` Выгрузить${selectedSaveSlot ? ` из слота ${selectedSaveSlot}` : ''}`}</button>
+              <button onClick={loadGame} disabled={!selectedSaveSlot || !roomSaves.some(s => s.slot === selectedSaveSlot) || isSaving || isLoadingSave} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm">{isLoadingSave ? '⏳ Выгружаем...' : `📤 Выгрузить${selectedSaveSlot ? ` из слота ${selectedSaveSlot}` : ''}`}</button>
             </div>
             {selectedSaveSlot && <p className="text-xs text-amber-400 mt-2 text-center">Выбран слот {selectedSaveSlot}</p>}
           </div>
@@ -824,7 +843,7 @@ export default function Dashboard() {
         <div className="w-64 bg-gray-800 border-r border-gray-700 p-4 flex flex-col flex-shrink-0">
           <h2 className="text-xl font-bold text-blue-500 mb-4">🎲 Меню Игрока</h2>
           <button onClick={() => setCurrentView('map')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'map' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🗺️ Карта</button>
-          <button onClick={() => setCurrentView('characters')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'characters' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}> Персонажи</button>
+          <button onClick={() => setCurrentView('characters')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'characters' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>👤 Персонажи</button>
           <button onClick={() => setCurrentView('items')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'items' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🎒 Предметы</button>
           <button onClick={() => setCurrentView('proposals')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'proposals' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>💡 Предложение</button>
           <button onClick={() => { setCurrentView('lore-short'); fetchLoreNotes('short'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-short' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📜 Краткий лор</button>
@@ -872,7 +891,7 @@ export default function Dashboard() {
                       <button onClick={() => setCurrentTool('pan')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'pan' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>✋</button>
                       <button onClick={() => setCurrentTool('brush')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'brush' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🖌️</button>
                       <button onClick={() => setCurrentTool('eraser')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'eraser' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🧹</button>
-                      <button onClick={() => setCurrentTool('fog-add')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-add' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>️+</button>
+                      <button onClick={() => setCurrentTool('fog-add')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-add' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🌫️+</button>
                       <button onClick={() => setCurrentTool('fog-remove')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-remove' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🌫️-</button>
                       {currentTool !== 'pan' && currentTool !== 'fog-add' && currentTool !== 'fog-remove' && (
                         <>
@@ -889,11 +908,22 @@ export default function Dashboard() {
                       )}
                     </>
                   )}
-                  {/* ✅ Ползунок сетки только для Мастера */}
                   {role === 'dm' && (
                     <div className="flex items-center gap-2">
                       <span className="text-sm text-gray-400">Сетка: {gridSize}px</span>
-                      <input type="range" min="50" max="300" value={gridSize} onChange={(e) => { const newSize = Number(e.target.value); setGridSize(newSize); updateRoomSettings({ grid_size: newSize }); }} className="w-24" />
+                      <input 
+                        type="range" 
+                        min="50" 
+                        max="300" 
+                        value={gridSize} 
+                        onChange={(e) => {
+                          const newSize = Number(e.target.value);
+                          setGridSize(newSize);
+                          gridSizeRef.current = newSize; // ✅ Мгновенное обновление ref
+                          updateRoomSettings({ grid_size: newSize });
+                        }} 
+                        className="w-24" 
+                      />
                     </div>
                   )}
                   <div className="flex items-center gap-2">
@@ -907,26 +937,27 @@ export default function Dashboard() {
               
               <div ref={mapContainerRef} className="flex-1 bg-gray-800 rounded-lg border-2 border-gray-600 relative overflow-hidden select-none" style={{ cursor: currentTool === 'pan' ? (isPanning ? 'grabbing' : 'grab') : (role === 'player' ? 'grab' : 'crosshair'), WebkitUserSelect: 'none', userSelect: 'none' }} onDragStart={(e) => e.preventDefault()} onMouseDown={handleMapMouseDown} onMouseMove={handleMapMouseMove} onMouseUp={handleMapMouseUp} onMouseLeave={() => { handleMapMouseUp(); setMousePos(null); }} onWheel={handleWheel}>
                 
-                {/* ✅ СЕТКА ТЕПЕРЬ ВНУТРИ ТРАНСФОРМИРУЕМОГО СЛОЯ КАРТЫ */}
+                {/* ✅ ИСПРАВЛЕНО: Сетка и карта теперь имеют размер 10000x10000 и находятся в одном слое трансформации */}
                 <div className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', zIndex: 0 }}>
                   {mapImage ? (
-                    <img src={mapImage} alt="Карта" className="max-w-none select-none pointer-events-none" draggable={false} style={{ minWidth: '2000px', minHeight: '2000px' }} />
+                    <img src={mapImage} alt="Карта" className="max-w-none select-none pointer-events-none" draggable={false} style={{ minWidth: `${MAP_WORKSPACE_SIZE}px`, minHeight: `${MAP_WORKSPACE_SIZE}px` }} />
                   ) : (
-                    <div className="bg-gray-700 flex items-center justify-center" style={{ width: '2000px', height: '2000px' }}>
+                    <div className="bg-gray-700 flex items-center justify-center" style={{ width: `${MAP_WORKSPACE_SIZE}px`, height: `${MAP_WORKSPACE_SIZE}px` }}>
                       <p className="text-gray-400">Загрузите карту</p>
                     </div>
                   )}
-                  {/* Сетка рисуется поверх карты, но в том же слое — масштабируется вместе */}
+                  
+                  {/* ✅ ИСПРАВЛЕНО: Линии сетки 5px, размер поля 10000x10000 */}
                   <div
                     className="absolute pointer-events-none"
                     style={{
                       left: 0,
                       top: 0,
-                      width: '2000px',
-                      height: '2000px',
+                      width: `${MAP_WORKSPACE_SIZE}px`,
+                      height: `${MAP_WORKSPACE_SIZE}px`,
                       backgroundImage: `
-                        linear-gradient(to right, rgba(0,0,0,0.4) 1px, transparent 1px),
-                        linear-gradient(to bottom, rgba(0,0,0,0.4) 1px, transparent 1px)
+                        linear-gradient(to right, rgba(0,0,0,0.65) 0, rgba(0,0,0,0.65) 5px, transparent 5px),
+                        linear-gradient(to bottom, rgba(0,0,0,0.65) 0, rgba(0,0,0,0.65) 5px, transparent 5px)
                       `,
                       backgroundSize: `${gridSize}px ${gridSize}px`,
                       backgroundPosition: '0 0',
@@ -940,7 +971,7 @@ export default function Dashboard() {
                       {token.image_url ? <img src={token.image_url} alt={token.name} className="w-full h-full object-cover rounded select-none pointer-events-none" draggable={false} /> : <div className="w-full h-full bg-blue-600 text-white flex items-center justify-center rounded text-xs font-bold p-1 text-center">{token.name}</div>}
                       {selectedToken === token.id && role === 'dm' && (
                         <div className="layer-controls absolute -top-10 left-1/2 -translate-x-1/2 flex gap-1 bg-gray-900 rounded px-2 py-1 shadow-lg whitespace-nowrap border border-gray-600">
-                          <button onClick={(e) => { e.stopPropagation(); raiseTokenLayer(token); }} className="text-xs px-2 py-1 bg-green-600 hover:bg-green-700 rounded">️</button>
+                          <button onClick={(e) => { e.stopPropagation(); raiseTokenLayer(token); }} className="text-xs px-2 py-1 bg-green-600 hover:bg-green-700 rounded">⬆️</button>
                           <span className="text-xs text-gray-400 self-center">{token.layer || 10}</span>
                           <button onClick={(e) => { e.stopPropagation(); lowerTokenLayer(token); }} className="text-xs px-2 py-1 bg-red-600 hover:bg-red-700 rounded">⬇️</button>
                         </div>
@@ -975,11 +1006,22 @@ export default function Dashboard() {
                 <input type="file" accept="image/*" onChange={handleMapUpload} disabled={isMapUploading} className="w-full p-2 bg-gray-700 rounded mb-4 disabled:opacity-50" />
                 {isMapUploading && <p className="text-sm text-yellow-400 mb-4" role="status">Сжимаем и загружаем карту...</p>}
                 {mapImage && <img src={mapImage} alt="Предпросмотр" className="max-w-full h-64 object-contain border border-gray-600 rounded mb-4" />}
-                {/* ✅ Ползунок сетки в upload-map тоже только для Мастера */}
                 {role === 'dm' && (
                   <>
                     <label className="block text-sm font-bold mb-2">Размер сетки: {gridSize}px</label>
-                    <input type="range" min="50" max="300" value={gridSize} onChange={(e) => { const newSize = Number(e.target.value); setGridSize(newSize); updateRoomSettings({ grid_size: newSize }); }} className="w-full mb-4" />
+                    <input 
+                      type="range" 
+                      min="50" 
+                      max="300" 
+                      value={gridSize} 
+                      onChange={(e) => {
+                        const newSize = Number(e.target.value);
+                        setGridSize(newSize);
+                        gridSizeRef.current = newSize; // ✅ Мгновенное обновление ref
+                        updateRoomSettings({ grid_size: newSize });
+                      }} 
+                      className="w-full mb-4" 
+                    />
                   </>
                 )}
                 <button onClick={() => setCurrentView('map')} className="bg-green-600 hover:bg-green-700 px-6 py-2 rounded font-bold">Применить</button>
@@ -990,7 +1032,7 @@ export default function Dashboard() {
           {currentView === 'characters' && (
             <div>
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl font-bold text-amber-500">{role === 'player' ? ' Персонажи' : '👥 Персонажи'}</h2>
+                <h2 className="text-2xl font-bold text-amber-500">{role === 'player' ? '👤 Персонажи' : '👥 Персонажи'}</h2>
                 <button
                   onClick={() => {
                     setSelectedCharacter(null);
@@ -1082,7 +1124,7 @@ export default function Dashboard() {
             <div>
               <div className="flex justify-between items-center mb-6">
                 <div>
-                  <h2 className="text-2xl font-bold text-amber-500">️ Предметы</h2>
+                  <h2 className="text-2xl font-bold text-amber-500">⚔️ Предметы</h2>
                   {role === 'player' && <p className="text-sm text-gray-400 mt-1">Предметы, выданные вашему персонажу</p>}
                   {role === 'dm' && <p className="text-sm text-gray-400 mt-1">Управление предметами игроков</p>}
                 </div>
@@ -1229,7 +1271,7 @@ export default function Dashboard() {
 
           {currentView === 'proposals' && (
             <div className="max-w-3xl mx-auto">
-              <h2 className="text-2xl font-bold text-amber-500 mb-6">{role === 'dm' ? ' Пожелания от игроков' : '💡 Предложение Мастеру'}</h2>
+              <h2 className="text-2xl font-bold text-amber-500 mb-6">{role === 'dm' ? '💫 Пожелания от игроков' : '💡 Предложение Мастеру'}</h2>
               {role === 'player' ? (
                 <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 mb-6">
                   <h3 className="text-xl font-bold mb-4">Написать сообщение</h3>
@@ -1257,7 +1299,7 @@ export default function Dashboard() {
             <div className="max-w-4xl mx-auto">
               <div className="flex justify-between items-center mb-6">
                 <div>
-                  <h2 className="text-2xl font-bold text-amber-500">{currentView === 'lore-full' ? '📖 Лор' : ' Краткий лор'}</h2>
+                  <h2 className="text-2xl font-bold text-amber-500">{currentView === 'lore-full' ? '📖 Лор' : '📜 Краткий лор'}</h2>
                   <p className="text-sm text-gray-400 mt-1">{currentView === 'lore-full' ? 'Полная информация о мире кампании' : 'Информация, доступная игрокам'}</p>
                 </div>
                 {role === 'dm' && (
@@ -1294,7 +1336,7 @@ export default function Dashboard() {
           <h3 className="text-lg font-bold text-amber-500 mb-2">👥 Участники</h3>
           <div className="bg-gray-700 p-3 rounded mb-3">
             <p className="font-bold">{user}</p>
-            <p className="text-xs text-gray-400">{role === 'dm' ? ' Мастер' : '🎲 Игрок'}</p>
+            <p className="text-xs text-gray-400">{role === 'dm' ? '👑 Мастер' : '🎲 Игрок'}</p>
           </div>
           <div className="space-y-1 max-h-32 overflow-y-auto">
             {participants.map((p, i) => (
