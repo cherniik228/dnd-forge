@@ -21,8 +21,20 @@ interface RoomSave {
   updated_at?: string;
 }
 
+interface DrawingStroke {
+  id: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  color: string;
+  size: number;
+  eraser: boolean;
+}
+
 const FOG_CANVAS_SIZE = 4000;
-const MAP_WORKSPACE_SIZE = 10000; // ✅ Бесконечное рабочее поле
+const MAP_WORKSPACE_SIZE = 10000;
+const DRAWING_CANVAS_SIZE = MAP_WORKSPACE_SIZE;
 
 const blobToDataUrl = (blob: Blob) => new Promise<string>((resolve, reject) => {
   const reader = new FileReader();
@@ -95,9 +107,13 @@ export default function Dashboard() {
   const [brushSize, setBrushSize] = useState(5);
   const [currentTool, setCurrentTool] = useState<Tool>('pan');
   const [isDrawing, setIsDrawing] = useState(false);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fogCanvasRef = useRef<HTMLCanvasElement>(null);
-  const lastPos = useRef<{ x: number; y: number } | null>(null);
+  const lastPos = useRef<Point | null>(null);
+
+  const [drawingStrokes, setDrawingStrokes] = useState<DrawingStroke[]>([]);
+  const drawingStrokesRef = useRef<DrawingStroke[]>([]);
 
   const [fogPolygons, setFogPolygons] = useState<FogPolygon[]>([]);
   const [currentFogPoints, setCurrentFogPoints] = useState<Point[]>([]);
@@ -128,12 +144,13 @@ export default function Dashboard() {
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const mapOffsetRef = useRef(mapOffset);
   const zoomRef = useRef(zoom);
-  const gridSizeRef = useRef(gridSize); // ✅ Используется для мгновенного доступа в замыканиях
+  const gridSizeRef = useRef(gridSize);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const hasSubscribedOnce = useRef(false);
   const [isMapUploading, setIsMapUploading] = useState(false);
   const [remoteFogPreview, setRemoteFogPreview] = useState<{ points: Point[]; type: 'add' | 'remove' } | null>(null);
 
+  useEffect(() => { drawingStrokesRef.current = drawingStrokes; }, [drawingStrokes]);
   useEffect(() => { fogPolygonsRef.current = fogPolygons; }, [fogPolygons]);
   useEffect(() => { currentFogPointsRef.current = currentFogPoints; }, [currentFogPoints]);
   useEffect(() => { boardTokensRef.current = boardTokens; }, [boardTokens]);
@@ -141,35 +158,38 @@ export default function Dashboard() {
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   useEffect(() => { gridSizeRef.current = gridSize; }, [gridSize]);
 
-  const drawRemoteStroke = (s: any) => {
-    const canvas = canvasRef.current, ctx = canvas?.getContext('2d');
-    if (!canvas || !ctx || !s) return;
-    const rect = canvas.getBoundingClientRect();
-    ctx.beginPath();
-    ctx.moveTo(s.x1 * rect.width, s.y1 * rect.height);
-    ctx.lineTo(s.x2 * rect.width, s.y2 * rect.height);
-    ctx.strokeStyle = s.eraser ? 'rgba(0,0,0,0)' : s.color;
-    ctx.lineWidth = s.size; ctx.lineCap = 'round'; ctx.stroke();
-  };
+  // ✅ Рисование штриха на canvas (в координатах игрового поля)
+  const drawStrokeOnCanvas = useCallback(
+    (stroke: DrawingStroke, canvas: HTMLCanvasElement | null = null) => {
+      const target = canvas || canvasRef.current;
+      if (!target) return;
+      const ctx = target.getContext('2d');
+      if (!ctx) return;
+
+      ctx.save();
+      if (stroke.eraser) {
+        ctx.globalCompositeOperation = 'destination-out';
+      } else {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.strokeStyle = stroke.color;
+      }
+      ctx.lineWidth = stroke.size;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(stroke.x1, stroke.y1);
+      ctx.lineTo(stroke.x2, stroke.y2);
+      ctx.stroke();
+      ctx.restore();
+    },
+    []
+  );
 
   const isChannelReadyRef = useRef(false);
   const broadcast = useCallback((event: string, payload: any = {}) => {
     if (!channelRef.current || !isChannelReadyRef.current) return;
     channelRef.current.send({ type: 'broadcast', event, payload });
   }, []);
-
-  const strokeBufferRef = useRef<any[]>([]);
-  const strokeFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const queueStroke = useCallback((stroke: any) => {
-    strokeBufferRef.current.push(stroke);
-    if (strokeFlushTimerRef.current) return;
-    strokeFlushTimerRef.current = setTimeout(() => {
-      strokeFlushTimerRef.current = null;
-      const strokes = strokeBufferRef.current;
-      strokeBufferRef.current = [];
-      if (strokes.length) broadcast('brush_strokes', { strokes });
-    }, 80);
-  }, [broadcast]);
 
   const upsertById = <T extends { id?: any }>(list: T[], row: T): T[] => {
     const exists = list.some(x => x.id === row.id);
@@ -181,32 +201,100 @@ export default function Dashboard() {
     setFogPolygons(Array.isArray(fog) ? fog : []);
   };
 
-  // ✅ ИСПРАВЛЕНО: Синхронизация state и ref
+  // ✅ Сохранение рисунков в БД
+  const saveDrawingToDatabase = useCallback(
+    async (strokes: DrawingStroke[]) => {
+      if (role !== 'dm' || !roomId) return;
+      const { error } = await supabase
+        .from('rooms')
+        .update({ drawing_data: strokes })
+        .eq('id', roomId);
+      if (error) console.error('❌ Ошибка сохранения рисунка:', error);
+    },
+    [role, roomId]
+  );
+
+  // ✅ Перерисовка тумана
+  const redrawFogCanvas = useCallback(() => {
+    const fogCanvas = fogCanvasRef.current;
+    if (!fogCanvas) return;
+    const ctx = fogCanvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
+    fogPolygons.forEach(polygon => {
+      if (polygon.points.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(polygon.points[0].x, polygon.points[0].y);
+      for (let i = 1; i < polygon.points.length; i++) ctx.lineTo(polygon.points[i].x, polygon.points[i].y);
+      ctx.closePath();
+      if (polygon.type === 'add') { ctx.fillStyle = `rgba(0, 0, 0, ${role === 'dm' ? 0.5 : 1.0})`; ctx.fill(); }
+      else { ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = 'rgba(0, 0, 0, 1)'; ctx.fill(); ctx.globalCompositeOperation = 'source-over'; }
+    });
+  }, [fogPolygons, role]);
+
+  // ✅ Инициализация canvas (рисунок + туман)
+  const initCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    canvas.width = DRAWING_CANVAS_SIZE;
+    canvas.height = DRAWING_CANVAS_SIZE;
+    canvas.style.width = `${DRAWING_CANVAS_SIZE}px`;
+    canvas.style.height = `${DRAWING_CANVAS_SIZE}px`;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    drawingStrokesRef.current.forEach(stroke => {
+      drawStrokeOnCanvas(stroke, canvas);
+    });
+
+    redrawFogCanvas();
+  }, [drawStrokeOnCanvas, redrawFogCanvas]);
+
   const reloadRoomLight = useCallback(async (id: string) => {
-    const { data } = await supabase.from('rooms').select('grid_size, fog_data').eq('id', id).single();
+    const { data } = await supabase
+      .from('rooms')
+      .select('grid_size, fog_data, drawing_data')
+      .eq('id', id)
+      .single();
     if (!data) return;
     const nextGridSize = Number(data.grid_size) || 100;
     setGridSize(nextGridSize);
     gridSizeRef.current = nextGridSize;
     applyFog(data.fog_data);
-  }, []);
+    const drawings = Array.isArray(data.drawing_data) ? data.drawing_data : [];
+    setDrawingStrokes(drawings);
+    drawingStrokesRef.current = drawings;
+    setTimeout(() => initCanvas(), 50);
+  }, [initCanvas]);
 
   const roomReloadInFlight = useRef(false);
   const reloadRoomState = useCallback(async (id: string) => {
     if (roomReloadInFlight.current) return;
     roomReloadInFlight.current = true;
     try {
-      const { data } = await supabase.from('rooms').select('map_image, grid_size, fog_data').eq('id', id).single();
+      const { data } = await supabase
+        .from('rooms')
+        .select('map_image, grid_size, fog_data, drawing_data')
+        .eq('id', id)
+        .single();
       if (!data) return;
       setMapImage(data.map_image || '');
       const nextGridSize = Number(data.grid_size) || 100;
       setGridSize(nextGridSize);
       gridSizeRef.current = nextGridSize;
       applyFog(data.fog_data);
+      const drawings = Array.isArray(data.drawing_data) ? data.drawing_data : [];
+      setDrawingStrokes(drawings);
+      drawingStrokesRef.current = drawings;
+      setTimeout(() => initCanvas(), 100);
     } finally {
       roomReloadInFlight.current = false;
     }
-  }, []);
+  }, [initCanvas]);
 
   const tableSetters: Record<string, (rows: any[]) => void> = {
     characters: setCharacters,
@@ -257,6 +345,10 @@ export default function Dashboard() {
     
     if (room.fog_data && Array.isArray(room.fog_data)) setFogPolygons(room.fog_data);
     else setFogPolygons([]);
+
+    const initialDrawings = Array.isArray(room.drawing_data) ? room.drawing_data : [];
+    setDrawingStrokes(initialDrawings);
+    drawingStrokesRef.current = initialDrawings;
     
     const { data: roomData, error: dataError } = await supabase
       .from('rooms')
@@ -319,23 +411,21 @@ export default function Dashboard() {
         if (payload.errors?.length) { reloadTable('board_tokens', roomId); return; }
         setBoardTokens(prev => upsertById(prev, row));
       })
-      // ✅ ИСПРАВЛЕНО: Надежная синхронизация grid_size независимо от map_image
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` }, (payload: any) => {
         const row = payload.new || {};
-        if (payload.errors?.length) {
-          reloadRoomLight(roomId);
-          return;
-        }
+        if (payload.errors?.length) { reloadRoomLight(roomId); return; }
         if (row.grid_size !== undefined && row.grid_size !== null) {
           const nextGridSize = Number(row.grid_size);
           setGridSize(nextGridSize);
           gridSizeRef.current = nextGridSize;
         }
-        if (row.map_image !== undefined) {
-          setMapImage(row.map_image || '');
-        }
-        if (row.fog_data !== undefined) {
-          applyFog(row.fog_data);
+        if (row.map_image !== undefined) setMapImage(row.map_image || '');
+        if (row.fog_data !== undefined) applyFog(row.fog_data);
+        if (row.drawing_data !== undefined) {
+          const drawings = Array.isArray(row.drawing_data) ? row.drawing_data : [];
+          setDrawingStrokes(drawings);
+          drawingStrokesRef.current = drawings;
+          setTimeout(() => initCanvas(), 50);
         }
       })
       .on('broadcast', { event: 'map_updated' }, ({ payload }) => {
@@ -343,8 +433,37 @@ export default function Dashboard() {
         else { reloadRoomState(roomId); }
       })
       .on('broadcast', { event: 'fog_preview' }, ({ payload }) => { setRemoteFogPreview(Array.isArray(payload?.points) ? payload : null); })
-      .on('broadcast', { event: 'brush_strokes' }, ({ payload }) => { if (Array.isArray(payload?.strokes)) payload.strokes.forEach(drawRemoteStroke); })
-      .on('broadcast', { event: 'brush_clear' }, () => { const canvas = canvasRef.current, ctx = canvas?.getContext('2d'); if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height); })
+      .on('broadcast', { event: 'brush_strokes' }, ({ payload }) => {
+        if (!Array.isArray(payload?.strokes)) return;
+        const incoming = payload.strokes as DrawingStroke[];
+        setDrawingStrokes(prev => {
+          const existingIds = new Set(prev.map(s => s.id));
+          const newStrokes = incoming.filter(stroke => !existingIds.has(stroke.id));
+          if (!newStrokes.length) return prev;
+          const next = [...prev, ...newStrokes];
+          drawingStrokesRef.current = next;
+          return next;
+        });
+        incoming.forEach(stroke => drawStrokeOnCanvas(stroke));
+      })
+      .on('broadcast', { event: 'drawing_updated' }, ({ payload }) => {
+        if (!Array.isArray(payload?.strokes)) return;
+        const strokes = payload.strokes as DrawingStroke[];
+        setDrawingStrokes(strokes);
+        drawingStrokesRef.current = strokes;
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext('2d');
+        if (!canvas || !ctx) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        strokes.forEach(stroke => drawStrokeOnCanvas(stroke, canvas));
+      })
+      .on('broadcast', { event: 'brush_clear' }, () => {
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext('2d');
+        if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        setDrawingStrokes([]);
+        drawingStrokesRef.current = [];
+      })
       .on('broadcast', { event: 'token_moved' }, ({ payload }) => { if (payload.id === draggedTokenRef.current) return; setBoardTokens(prev => prev.map(t => (t.id === payload.id ? { ...t, ...payload } : t))); })
       .on('broadcast', { event: 'fog_updated' }, ({ payload }) => { if (Array.isArray(payload.fog)) setFogPolygons(payload.fog); setRemoteFogPreview(null); })
       .on('broadcast', { event: 'room_updated' }, () => { reloadRoomState(roomId); })
@@ -362,7 +481,7 @@ export default function Dashboard() {
 
     channelRef.current = channel;
     return () => { isChannelReadyRef.current = false; channelRef.current = null; supabase.removeChannel(channel); };
-  }, [roomId, reloadRoomState, reloadRoomLight, reloadTable, role, user]);
+  }, [roomId, reloadRoomState, reloadRoomLight, reloadTable, role, user, drawStrokeOnCanvas, initCanvas]);
 
   const saveFogToDatabase = useCallback(async (newFogPolygons: FogPolygon[]) => {
     if (role !== 'dm' || !roomId) return;
@@ -542,7 +661,7 @@ export default function Dashboard() {
 
   const createSaveSnapshot = () => {
     return {
-      map_image: mapImage, grid_size: gridSize, fog_data: fogPolygons,
+      map_image: mapImage, grid_size: gridSize, fog_data: fogPolygons, drawing_data: drawingStrokes,
       board_tokens: boardTokens.map(token => ({ id: token.id, room_id: token.room_id, token_type: token.token_type, token_id: token.token_id, name: token.name, image_url: token.image_url, grid_size: token.grid_size, position_x: token.position_x, position_y: token.position_y, layer: token.layer, author_nickname: token.author_nickname })),
     };
   };
@@ -576,7 +695,10 @@ export default function Dashboard() {
       if (data.grid_size) { setGridSize(data.grid_size); gridSizeRef.current = data.grid_size; }
       const restoredFog = Array.isArray(data.fog_data) ? data.fog_data : [];
       setFogPolygons(restoredFog);
-      await supabase.from('rooms').update({ map_image: data.map_image || '', grid_size: data.grid_size || 100, fog_data: restoredFog }).eq('id', roomId);
+      const restoredDrawings = Array.isArray(data.drawing_data) ? data.drawing_data : [];
+      setDrawingStrokes(restoredDrawings);
+      drawingStrokesRef.current = restoredDrawings;
+      await supabase.from('rooms').update({ map_image: data.map_image || '', grid_size: data.grid_size || 100, fog_data: restoredFog, drawing_data: restoredDrawings }).eq('id', roomId);
       if (Array.isArray(data.board_tokens)) {
         await supabase.from('board_tokens').delete().eq('room_id', roomId);
         if (data.board_tokens.length > 0) {
@@ -589,7 +711,9 @@ export default function Dashboard() {
       }
       broadcast('room_updated');
       broadcast('fog_updated', { fog: restoredFog });
+      broadcast('drawing_updated', { strokes: restoredDrawings });
       broadcast('table_changed', { table: 'board_tokens' });
+      setTimeout(() => initCanvas(), 100);
       alert(`Сохранение «${save.name}» выгружено.`);
     } catch (error: any) {
       console.error('Ошибка загрузки сохранения:', error);
@@ -692,7 +816,7 @@ export default function Dashboard() {
     const rect = container.getBoundingClientRect();
     const offset = mapOffsetRef.current;
     const z = zoomRef.current;
-    const grid = gridSizeRef.current; // ✅ Использует актуальное значение из ref
+    const grid = gridSizeRef.current;
     const x = (e.clientX - rect.left - offset.x - dragOffsetRef.current.x) / z;
     const y = (e.clientY - rect.top - offset.y - dragOffsetRef.current.y) / z;
     const snappedX = Math.round(x / grid) * grid;
@@ -716,36 +840,100 @@ export default function Dashboard() {
     if (error) { console.error("❌ Ошибка перемещения:", error); alert("Не удалось переместить: " + error.message); }
   };
 
-  const initCanvas = () => {
-    const canvas = canvasRef.current;
-    if (canvas) {
-      const container = canvas.parentElement;
-      if (container) { canvas.width = container.clientWidth * 2; canvas.height = container.clientHeight * 2; }
-      const ctx = canvas.getContext('2d');
-      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
-    redrawFogCanvas();
+  // ✅ Координаты в пространстве игрового поля (10000×10000)
+  const getCanvasPos = (e: React.MouseEvent<HTMLCanvasElement>): Point => {
+    const container = mapContainerRef.current;
+    if (!container) return { x: 0, y: 0 };
+    const rect = container.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left - mapOffsetRef.current.x) / zoomRef.current,
+      y: (e.clientY - rect.top - mapOffsetRef.current.y) / zoomRef.current,
+    };
   };
 
-  const redrawFogCanvas = useCallback(() => {
-    const fogCanvas = fogCanvasRef.current;
-    if (!fogCanvas) return;
-    const ctx = fogCanvas.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
-    fogPolygons.forEach(polygon => {
-      if (polygon.points.length < 2) return;
-      ctx.beginPath();
-      ctx.moveTo(polygon.points[0].x, polygon.points[0].y);
-      for (let i = 1; i < polygon.points.length; i++) ctx.lineTo(polygon.points[i].x, polygon.points[i].y);
-      ctx.closePath();
-      if (polygon.type === 'add') { ctx.fillStyle = `rgba(0, 0, 0, ${role === 'dm' ? 0.5 : 1.0})`; ctx.fill(); }
-      else { ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = 'rgba(0, 0, 0, 1)'; ctx.fill(); ctx.globalCompositeOperation = 'source-over'; }
-    });
-  }, [fogPolygons, role]);
+  // ✅ Начало рисования
+  const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (currentTool !== 'brush' && currentTool !== 'eraser') return;
+    e.stopPropagation();
+    setIsDrawing(true);
+    lastPos.current = getCanvasPos(e);
+  };
 
-  useEffect(() => { if (currentView === 'map') setTimeout(initCanvas, 100); }, [currentView]);
-  useEffect(() => { if (currentView === 'map') redrawFogCanvas(); }, [fogPolygons, role, currentView, redrawFogCanvas]);
+  // ✅ Рисование штриха
+  const draw = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDrawing) return;
+    if (!lastPos.current) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const pos = getCanvasPos(e);
+
+    const stroke: DrawingStroke = {
+      id: crypto.randomUUID(),
+      x1: lastPos.current.x,
+      y1: lastPos.current.y,
+      x2: pos.x,
+      y2: pos.y,
+      color: brushColor,
+      size: brushSize,
+      eraser: currentTool === 'eraser',
+    };
+
+    drawStrokeOnCanvas(stroke, canvas);
+    queueStroke(stroke);
+    lastPos.current = pos;
+  };
+
+  const stopDrawing = () => {
+    setIsDrawing(false);
+    lastPos.current = null;
+  };
+
+  // ✅ Очередь штрихов с сохранением в БД
+  const strokeBufferRef = useRef<DrawingStroke[]>([]);
+  const strokeFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const queueStroke = useCallback(
+    (stroke: DrawingStroke) => {
+      strokeBufferRef.current.push(stroke);
+      if (strokeFlushTimerRef.current) return;
+      strokeFlushTimerRef.current = setTimeout(async () => {
+        strokeFlushTimerRef.current = null;
+        const strokes = strokeBufferRef.current;
+        strokeBufferRef.current = [];
+        if (!strokes.length) return;
+        broadcast('brush_strokes', { strokes });
+        if (role === 'dm' && roomId) {
+          const allStrokes = [...drawingStrokesRef.current, ...strokes];
+          drawingStrokesRef.current = allStrokes;
+          setDrawingStrokes(allStrokes);
+          await saveDrawingToDatabase(allStrokes);
+        }
+      }, 80);
+    },
+    [broadcast, role, roomId, saveDrawingToDatabase]
+  );
+
+  // ✅ Очистка рисунка
+  const clearCanvas = async () => {
+    if (role !== 'dm') return;
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setDrawingStrokes([]);
+    drawingStrokesRef.current = [];
+    await supabase.from('rooms').update({ drawing_data: [] }).eq('id', roomId);
+    broadcast('brush_clear');
+  };
+
+  const clearFog = async () => { setFogPolygons([]); setCurrentFogPoints([]); if (role === 'dm') await saveFogToDatabase([]); };
+
+  const fogPreview = currentFogPoints.map(p => ({ x: p.x * zoom + mapOffset.x, y: p.y * zoom + mapOffset.y }));
+
+  useEffect(() => {
+    if (currentView !== 'map') return;
+    const timer = setTimeout(() => { initCanvas(); }, 100);
+    return () => clearTimeout(timer);
+  }, [currentView, initCanvas]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -766,36 +954,6 @@ export default function Dashboard() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [currentTool, redrawFogCanvas, saveFogToDatabase]);
 
-  const getCanvasPos = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return { x: 0, y: 0 };
-    const rect = canvas.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  };
-
-  const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (currentTool === 'brush' || currentTool === 'eraser') { setIsDrawing(true); lastPos.current = getCanvasPos(e); }
-  };
-
-  const draw = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
-    const canvas = canvasRef.current, ctx = canvas?.getContext('2d');
-    if (!ctx || !lastPos.current) return;
-    const pos = getCanvasPos(e);
-    ctx.beginPath(); ctx.moveTo(lastPos.current.x, lastPos.current.y); ctx.lineTo(pos.x, pos.y);
-    ctx.strokeStyle = currentTool === 'eraser' ? 'rgba(0,0,0,0)' : brushColor;
-    ctx.lineWidth = brushSize; ctx.lineCap = 'round'; ctx.stroke();
-    const rect = canvas!.getBoundingClientRect();
-    queueStroke({ x1: lastPos.current.x / rect.width, y1: lastPos.current.y / rect.height, x2: pos.x / rect.width, y2: pos.y / rect.height, color: brushColor, size: brushSize, eraser: currentTool === 'eraser' });
-    lastPos.current = pos;
-  };
-
-  const stopDrawing = () => { setIsDrawing(false); lastPos.current = null; };
-  const clearCanvas = () => { const canvas = canvasRef.current, ctx = canvas?.getContext('2d'); if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height); broadcast('brush_clear'); };
-  const clearFog = async () => { setFogPolygons([]); setCurrentFogPoints([]); if (role === 'dm') await saveFogToDatabase([]); };
-
-  const fogPreview = currentFogPoints.map(p => ({ x: p.x * zoom + mapOffset.x, y: p.y * zoom + mapOffset.y }));
-
   const visibleCharacters = role === 'dm' ? characters : characters.filter(char => char.author_nickname === user);
   const visibleItems = role === 'dm' ? items : items.filter(item => item.owner_nickname === user);
   const inventoryItems = selectedInventoryPlayer ? items.filter(item => item.owner_nickname === selectedInventoryPlayer) : [];
@@ -811,7 +969,7 @@ export default function Dashboard() {
           <button onClick={() => { setCurrentView('lore-full'); fetchLoreNotes('full'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-full' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📖 Лор</button>
           <button onClick={() => { setCurrentView('lore-short'); fetchLoreNotes('short'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-short' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📜 Краткий лор</button>
           <button onClick={() => setCurrentView('items')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'items' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>⚔️ Предметы</button>
-          <button onClick={() => setCurrentView('objects')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'objects' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🏺 Объекты</button>
+          <button onClick={() => setCurrentView('objects')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'objects' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}> Объекты</button>
           <button onClick={() => setCurrentView('proposals')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'proposals' ? 'bg-amber-600' : 'bg-gray-700 hover:bg-gray-600'}`}>💫 Пожелания</button>
           
           <div className="mt-auto border-t border-gray-700 pt-4">
@@ -831,7 +989,7 @@ export default function Dashboard() {
               })}
             </div>
             <div className="space-y-2">
-              <button onClick={saveGame} disabled={!selectedSaveSlot || isSaving || isLoadingSave} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm">{isSaving ? '⏳ Сохраняем...' : `💾 Сохранить${selectedSaveSlot ? ` в слот ${selectedSaveSlot}` : ''}`}</button>
+              <button onClick={saveGame} disabled={!selectedSaveSlot || isSaving || isLoadingSave} className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm">{isSaving ? ' Сохраняем...' : `💾 Сохранить${selectedSaveSlot ? ` в слот ${selectedSaveSlot}` : ''}`}</button>
               <button onClick={loadGame} disabled={!selectedSaveSlot || !roomSaves.some(s => s.slot === selectedSaveSlot) || isSaving || isLoadingSave} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed p-2 rounded font-bold text-sm">{isLoadingSave ? '⏳ Выгружаем...' : `📤 Выгрузить${selectedSaveSlot ? ` из слота ${selectedSaveSlot}` : ''}`}</button>
             </div>
             {selectedSaveSlot && <p className="text-xs text-amber-400 mt-2 text-center">Выбран слот {selectedSaveSlot}</p>}
@@ -845,8 +1003,8 @@ export default function Dashboard() {
           <button onClick={() => setCurrentView('map')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'map' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🗺️ Карта</button>
           <button onClick={() => setCurrentView('characters')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'characters' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>👤 Персонажи</button>
           <button onClick={() => setCurrentView('items')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'items' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🎒 Предметы</button>
-          <button onClick={() => setCurrentView('proposals')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'proposals' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>💡 Предложение</button>
-          <button onClick={() => { setCurrentView('lore-short'); fetchLoreNotes('short'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-short' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>📜 Краткий лор</button>
+          <button onClick={() => setCurrentView('proposals')} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'proposals' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}> Предложение</button>
+          <button onClick={() => { setCurrentView('lore-short'); fetchLoreNotes('short'); }} className={`w-full p-3 rounded mb-2 text-left flex items-center gap-2 ${currentView === 'lore-short' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}> Краткий лор</button>
         </div>
       )}
 
@@ -855,11 +1013,11 @@ export default function Dashboard() {
           <div className="flex items-center gap-4">
             {currentView !== 'main' && currentView !== 'map' && <button onClick={() => setCurrentView('main')} className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold">← Назад</button>}
             {currentView === 'map' && <button onClick={() => setCurrentView('main')} className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold">← К списку</button>}
-            <h1 className="text-2xl font-bold text-amber-500 truncate">⚔️ Стол: {roomKey}</h1>
+            <h1 className="text-2xl font-bold text-amber-500 truncate">️ Стол: {roomKey}</h1>
           </div>
           <div className="text-right">
             <p className="text-lg font-semibold">{user}</p>
-            <p className="text-sm text-gray-400 uppercase">{role === 'dm' ? '👑 Мастер' : '🎲 Игрок'}</p>
+            <p className="text-sm text-gray-400 uppercase">{role === 'dm' ? '👑 Мастер' : ' Игрок'}</p>
           </div>
         </div>
 
@@ -892,7 +1050,7 @@ export default function Dashboard() {
                       <button onClick={() => setCurrentTool('brush')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'brush' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🖌️</button>
                       <button onClick={() => setCurrentTool('eraser')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'eraser' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🧹</button>
                       <button onClick={() => setCurrentTool('fog-add')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-add' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🌫️+</button>
-                      <button onClick={() => setCurrentTool('fog-remove')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-remove' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>🌫️-</button>
+                      <button onClick={() => setCurrentTool('fog-remove')} className={`px-3 py-2 rounded font-bold text-sm ${currentTool === 'fog-remove' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>️-</button>
                       {currentTool !== 'pan' && currentTool !== 'fog-add' && currentTool !== 'fog-remove' && (
                         <>
                           <input type="color" value={brushColor} onChange={e => setBrushColor(e.target.value)} className="w-8 h-8 rounded cursor-pointer" />
@@ -908,24 +1066,6 @@ export default function Dashboard() {
                       )}
                     </>
                   )}
-                  {role === 'dm' && (
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm text-gray-400">Сетка: {gridSize}px</span>
-                      <input 
-                        type="range" 
-                        min="50" 
-                        max="300" 
-                        value={gridSize} 
-                        onChange={(e) => {
-                          const newSize = Number(e.target.value);
-                          setGridSize(newSize);
-                          gridSizeRef.current = newSize; // ✅ Мгновенное обновление ref
-                          updateRoomSettings({ grid_size: newSize });
-                        }} 
-                        className="w-24" 
-                      />
-                    </div>
-                  )}
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-gray-400">Зум: {Math.round(zoom * 100)}%</span>
                     <button onClick={() => setZoom(z => Math.max(0.3, z - 0.1))} className="px-2 py-1 bg-gray-700 rounded">-</button>
@@ -937,17 +1077,36 @@ export default function Dashboard() {
               
               <div ref={mapContainerRef} className="flex-1 bg-gray-800 rounded-lg border-2 border-gray-600 relative overflow-hidden select-none" style={{ cursor: currentTool === 'pan' ? (isPanning ? 'grabbing' : 'grab') : (role === 'player' ? 'grab' : 'crosshair'), WebkitUserSelect: 'none', userSelect: 'none' }} onDragStart={(e) => e.preventDefault()} onMouseDown={handleMapMouseDown} onMouseMove={handleMapMouseMove} onMouseUp={handleMapMouseUp} onMouseLeave={() => { handleMapMouseUp(); setMousePos(null); }} onWheel={handleWheel}>
                 
-                {/* ✅ ИСПРАВЛЕНО: Сетка и карта теперь имеют размер 10000x10000 и находятся в одном слое трансформации */}
-                <div className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', zIndex: 0 }}>
+                {/* ✅ СЛОЙ КАРТЫ + СЕТКИ (карта не зависит от gridSize) */}
+                <div
+                  className="absolute"
+                  style={{
+                    left: 0,
+                    top: 0,
+                    width: `${MAP_WORKSPACE_SIZE}px`,
+                    height: `${MAP_WORKSPACE_SIZE}px`,
+                    transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`,
+                    transformOrigin: '0 0',
+                    zIndex: 0,
+                  }}
+                >
                   {mapImage ? (
-                    <img src={mapImage} alt="Карта" className="max-w-none select-none pointer-events-none" draggable={false} style={{ minWidth: `${MAP_WORKSPACE_SIZE}px`, minHeight: `${MAP_WORKSPACE_SIZE}px` }} />
+                    <img
+                      src={mapImage}
+                      alt="Карта"
+                      draggable={false}
+                      className="absolute left-0 top-0 max-w-none max-h-none select-none pointer-events-none"
+                      style={{ width: 'auto', height: 'auto' }}
+                    />
                   ) : (
-                    <div className="bg-gray-700 flex items-center justify-center" style={{ width: `${MAP_WORKSPACE_SIZE}px`, height: `${MAP_WORKSPACE_SIZE}px` }}>
+                    <div
+                      className="bg-gray-700 flex items-center justify-center"
+                      style={{ width: `${MAP_WORKSPACE_SIZE}px`, height: `${MAP_WORKSPACE_SIZE}px` }}
+                    >
                       <p className="text-gray-400">Загрузите карту</p>
                     </div>
                   )}
-                  
-                  {/* ✅ ИСПРАВЛЕНО: Линии сетки 5px, размер поля 10000x10000 */}
+                  {/* Сетка — отдельный слой, зависит только от gridSize */}
                   <div
                     className="absolute pointer-events-none"
                     style={{
@@ -956,8 +1115,8 @@ export default function Dashboard() {
                       width: `${MAP_WORKSPACE_SIZE}px`,
                       height: `${MAP_WORKSPACE_SIZE}px`,
                       backgroundImage: `
-                        linear-gradient(to right, rgba(0,0,0,0.65) 0, rgba(0,0,0,0.65) 5px, transparent 5px),
-                        linear-gradient(to bottom, rgba(0,0,0,0.65) 0, rgba(0,0,0,0.65) 5px, transparent 5px)
+                        linear-gradient(to right, rgba(0,0,0,0.65) 0, rgba(0,0,0,0.65) 2px, transparent 2px),
+                        linear-gradient(to bottom, rgba(0,0,0,0.65) 0, rgba(0,0,0,0.65) 2px, transparent 2px)
                       `,
                       backgroundSize: `${gridSize}px ${gridSize}px`,
                       backgroundPosition: '0 0',
@@ -965,6 +1124,7 @@ export default function Dashboard() {
                   />
                 </div>
 
+                {/* Слой токенов */}
                 <div className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', zIndex: 50 }}>
                   {boardTokens.map(token => (
                     <div key={token.id} className={`absolute select-none token-element ${(role === 'dm' || token.author_nickname === user) ? 'cursor-move' : 'cursor-default'}`} style={{ left: token.position_x, top: token.position_y, width: (token.grid_size || 1) * gridSize, height: (token.grid_size || 1) * gridSize, zIndex: token.layer || 10, border: selectedToken === token.id ? '3px solid #fbbf24' : (token.author_nickname === user ? '2px solid #22c55e' : '2px solid #3b82f6'), boxShadow: selectedToken === token.id ? '0 0 15px rgba(251, 191, 36, 0.9), 0 0 30px rgba(251, 191, 36, 0.5)' : '0 4px 6px rgba(0,0,0,0.4)', transition: draggedToken === token.id ? 'none' : 'all 0.15s ease' }} onMouseDown={(e) => handleTokenMouseDown(e, token)} onClick={(e) => { e.stopPropagation(); setSelectedToken(token.id); }}>
@@ -979,7 +1139,33 @@ export default function Dashboard() {
                     </div>
                   ))}
                 </div>
-                {role === 'dm' && <canvas ref={canvasRef} className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', left: 0, top: 0, zIndex: 100, pointerEvents: (currentTool === 'brush' || currentTool === 'eraser') ? 'auto' : 'none' }} onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing} />}
+
+                {/* ✅ CANVAS РИСОВАНИЯ — есть у всех, но рисует только DM */}
+                <canvas
+                  ref={canvasRef}
+                  width={DRAWING_CANVAS_SIZE}
+                  height={DRAWING_CANVAS_SIZE}
+                  className="absolute"
+                  style={{
+                    width: `${DRAWING_CANVAS_SIZE}px`,
+                    height: `${DRAWING_CANVAS_SIZE}px`,
+                    transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`,
+                    transformOrigin: '0 0',
+                    left: 0,
+                    top: 0,
+                    zIndex: 100,
+                    pointerEvents:
+                      role === 'dm' &&
+                      (currentTool === 'brush' || currentTool === 'eraser')
+                        ? 'auto'
+                        : 'none',
+                  }}
+                  onMouseDown={role === 'dm' ? startDrawing : undefined}
+                  onMouseMove={role === 'dm' ? draw : undefined}
+                  onMouseUp={role === 'dm' ? stopDrawing : undefined}
+                  onMouseLeave={role === 'dm' ? stopDrawing : undefined}
+                />
+
                 <canvas ref={fogCanvasRef} width={FOG_CANVAS_SIZE} height={FOG_CANVAS_SIZE} className="absolute" style={{ transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`, transformOrigin: '0 0', left: 0, top: 0, zIndex: 102, pointerEvents: 'none' }} />
                 {role !== 'dm' && remoteFogPreview && remoteFogPreview.points.length > 1 && (
                   <svg className="absolute" style={{ left: 0, top: 0, width: '100%', height: '100%', zIndex: 103, pointerEvents: 'none' }} aria-hidden="true">
@@ -1001,7 +1187,7 @@ export default function Dashboard() {
 
           {currentView === 'upload-map' && (
             <div className="max-w-2xl mx-auto">
-              <h2 className="text-2xl font-bold text-amber-500 mb-6">🗺️ Загрузить карту</h2>
+              <h2 className="text-2xl font-bold text-amber-500 mb-6">️ Загрузить карту</h2>
               <div className="bg-gray-800 p-6 rounded-lg border border-gray-700">
                 <input type="file" accept="image/*" onChange={handleMapUpload} disabled={isMapUploading} className="w-full p-2 bg-gray-700 rounded mb-4 disabled:opacity-50" />
                 {isMapUploading && <p className="text-sm text-yellow-400 mb-4" role="status">Сжимаем и загружаем карту...</p>}
@@ -1017,7 +1203,7 @@ export default function Dashboard() {
                       onChange={(e) => {
                         const newSize = Number(e.target.value);
                         setGridSize(newSize);
-                        gridSizeRef.current = newSize; // ✅ Мгновенное обновление ref
+                        gridSizeRef.current = newSize;
                         updateRoomSettings({ grid_size: newSize });
                       }} 
                       className="w-full mb-4" 
@@ -1032,7 +1218,7 @@ export default function Dashboard() {
           {currentView === 'characters' && (
             <div>
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl font-bold text-amber-500">{role === 'player' ? '👤 Персонажи' : '👥 Персонажи'}</h2>
+                <h2 className="text-2xl font-bold text-amber-500">{role === 'player' ? ' Персонажи' : '👥 Персонажи'}</h2>
                 <button
                   onClick={() => {
                     setSelectedCharacter(null);
@@ -1130,7 +1316,7 @@ export default function Dashboard() {
                 </div>
                 {role === 'dm' && (
                   <div className="flex gap-2">
-                    <button onClick={() => { setSelectedInventoryPlayer(null); setShowInventoryViewer(true); }} className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded font-bold">👁 Просмотр</button>
+                    <button onClick={() => { setSelectedInventoryPlayer(null); setShowInventoryViewer(true); }} className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded font-bold"> Просмотр</button>
                     <button onClick={() => { setNewItem({ name: '', description: '', owner_nickname: '' }); setShowItemForm(true); }} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-bold">+ Создать</button>
                   </div>
                 )}
